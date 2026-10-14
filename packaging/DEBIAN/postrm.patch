@@ -1,0 +1,43 @@
+#!/bin/sh
+# ============================================================================
+# VolManAudioQueue 1.0.0 卸载前脚本（补丁包）
+#   1) 还原被停用的原版 VolumeManagerAudioQueue 模块
+#   2) 清理我们同步出去的配置副本与调试旁路样例文件
+#   注意：不动 VolumeManager-sunshinesong 目录里的原始数据（volumeInfo.plist 等）
+# ============================================================================
+
+JB=/var/jb
+DL="$JB/Library/MobileSubstrate/DynamicLibraries"
+
+SYNCED=/var/mobile/Library/Preferences/com.local.volmanaudioqueue.appvolume.plist
+
+restore_one() {
+    bak="$1.vmaq-backup"
+    alt="$1.vmaq-off"
+    src="$1"
+    if [ -f "$bak" ] && [ ! -f "$src" ]; then
+        mv "$bak" "$src" 2>/dev/null && \
+            echo "VolManAudioQueue: 已还原原版 $(basename "$src")"
+    elif [ -f "$alt" ] && [ ! -f "$src" ]; then
+        mv "$alt" "$src" 2>/dev/null && \
+            echo "VolManAudioQueue: 已还原原版 $(basename "$src")"
+    fi
+}
+
+echo "VolManAudioQueue: 正在还原原版模块…"
+restore_one "$DL/VolumeManagerAudioQueue.dylib"
+restore_one "$DL/VolumeManagerAudioQueue.plist"
+
+# 清理同步副本
+rm -f "$SYNCED" 2>/dev/null
+
+# 清理调试旁路样例
+for d in /var/jb/var/mobile/Library/VolumeManager-sunshinesong \
+         /var/mobile/Library/VolumeManager-sunshinesong ; do
+    rm -f "$d/vmaq-force.txt.sample" "$d/vmaq-force.txt" "$d/vmaq-path.txt" 2>/dev/null
+done
+
+echo ""
+echo "VolManAudioQueue: 已卸载。原版 VolumeManager 其余模块仍在，"
+echo "                  请 respring 一次让原版音量模块重新生效。"
+exit 0

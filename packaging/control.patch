@@ -1,0 +1,12 @@
+Package: com.local.volmanaudioqueue
+Name: VolManAudioQueue
+Version: 1.1.0
+Architecture: iphoneos-arm64
+Description: VolumeManager 每 App 音量模块重写版·补丁包。修复三处缺陷 —— 一是杂音，渲染回调改为按真实音频格式缩放，遇到不认识的格式一律不动数据；二是配置读不到，补上 Rootless 的 /var/jb 前缀并做多路径探测；三是改完音量要重开 App，补齐 HUD 通知监听加文件时间戳轮询兜底。arm64 单切片，不会进安全模式。1.1.0 新增设置面板净化模块 VolManPrefsClean：移除原作者遗留的支付宝打赏条目与收款链接、GitHub 关注与查看源码条目、Sileo 源条目、反盗版声明，以及面板末尾那段针对其他插件作者的长篇攻击文字，全部功能开关原样保留。
+Maintainer: local
+Author: local
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 15.0)
+Recommends: byg.iosios.net.volume-manager (>= 1.0.0)
+Conflicts: com.local.volmanaudioqueue.full
+Replaces: com.local.volmanaudioqueue.full

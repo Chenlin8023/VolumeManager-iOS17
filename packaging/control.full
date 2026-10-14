@@ -1,0 +1,11 @@
+Package: com.local.volmanaudioqueue.full
+Name: VolManAudioQueue Full
+Version: 1.1.0
+Architecture: iphoneos-arm64
+Description: VolumeManager 全量重打包版，一个 deb 装完整套。内含原版设置面板 VolumeManagerPrefs、音量 HUD VolumeManagerSBHUD、主模块 VolumeManager，重写后的每 App 音量引擎 VolManAudioQueue，以及设置面板净化模块 VolManPrefsClean。唯一不含的是原版有杂音的 VolumeManagerAudioQueue 模块。1.1.0 新增净化：设置界面里原作者的支付宝打赏条目与收款链接、GitHub 关注与查看源码条目、Sileo 源条目、反盗版声明，以及面板末尾那段针对其他插件作者的长篇攻击文字全部移除，功能开关一个不少。全新安装只需装这一个包，Orion 运行时由系统按依赖自动安装。
+Maintainer: local
+Author: local
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 15.0), dev.theos.orion (>= 1.0.0)
+Conflicts: byg.iosios.net.volume-manager, com.local.volmanaudioqueue
+Replaces: byg.iosios.net.volume-manager, com.local.volmanaudioqueue

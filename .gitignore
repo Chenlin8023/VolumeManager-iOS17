@@ -1,0 +1,23 @@
+# Theos 构建产物
+.theos/
+packages/
+obj/
+build/
+
+# 二进制不进仓库
+*.deb
+*.dylib
+*.o
+*.a
+
+# 逆向分析中间产物
+*.dump
+*.dis
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/

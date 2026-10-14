@@ -1,0 +1,27 @@
+#!/bin/sh
+# ============================================================================
+# VolManAudioQueue Full 1.0.0 卸载前脚本（全量包）
+#
+#   本包卸载 = 整个 VolumeManager 消失（HUD、设置面板、音量引擎全部移除）。
+#   不还原原版有杂音的 VolumeManagerAudioQueue 模块 —— 它被留档在
+#       /var/jb/var/mobile/Library/VolumeManager-sunshinesong/original-noisy-module-backup/
+#   用户数据（volumeInfo.plist、prefs、日志）一律保留，不删。
+# ============================================================================
+
+DIR_JB=/var/jb/var/mobile/Library/VolumeManager-sunshinesong
+SYNCED=/var/mobile/Library/Preferences/com.local.volmanaudioqueue.appvolume.plist
+
+echo "VolManAudioQueue Full: 卸载中…"
+
+rm -f "$SYNCED" 2>/dev/null
+
+for d in "$DIR_JB" /var/mobile/Library/VolumeManager-sunshinesong ; do
+    rm -f "$d/vmaq-force.txt.sample" "$d/vmaq-force.txt" "$d/vmaq-path.txt" 2>/dev/null
+done
+
+echo ""
+echo "已卸载全部 VolManAudioQueue 组件。"
+echo "  你的配置与日志仍保留在：$DIR_JB"
+echo "  （其中 volumeInfo.plist 是你的每 App 音量设置，不会被删除）"
+echo "  如需装回原版插件，请重新安装 VolumeManager 的 deb，然后 respring。"
+exit 0

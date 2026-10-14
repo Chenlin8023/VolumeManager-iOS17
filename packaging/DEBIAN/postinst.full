@@ -1,0 +1,107 @@
+#!/bin/sh
+# ============================================================================
+# VolManAudioQueue Full 1.0.0 安装后脚本（全量包）
+#
+# 本包自带全套组件，因此不需要「停用原版再补丁」这一套：
+#   自带 → Library/MobileSubstrate/DynamicLibraries/VolumeManager.dylib        (原版·主模块)
+#   自带 → Library/MobileSubstrate/DynamicLibraries/VolumeManagerSBHUD.dylib   (原版·音量 HUD)
+#   自带 → Library/PreferenceBundles/VolumeManagerPrefs.bundle                 (原版·设置面板)
+#   自带 → Library/MobileSubstrate/DynamicLibraries/VolManAudioQueue.dylib     (重写·每 App 音量引擎)
+#
+# 唯一不包含的是原版 VolumeManagerAudioQueue.dylib —— 杂音就是它造成的。
+# 所以这里要做的是「确保它不在加载路径里」，把它挪到数据目录留档即可。
+# （从旧版本升级过来时，旧 postrm 可能刚把它还原回来，这一步是必需的。）
+# ============================================================================
+
+JB=/var/jb
+DL="$JB/Library/MobileSubstrate/DynamicLibraries"
+
+DIR_JB=/var/jb/var/mobile/Library/VolumeManager-sunshinesong
+DIR_PLAIN=/var/mobile/Library/VolumeManager-sunshinesong
+DIR_JBROOT=/.jbroot/var/mobile/Library/VolumeManager-sunshinesong
+SYNCED=/var/mobile/Library/Preferences/com.local.volmanaudioqueue.appvolume.plist
+GRAVEYARD="$DIR_JB/original-noisy-module-backup"
+
+echo "VolManAudioQueue Full: 检查加载路径…"
+mkdir -p "$DIR_JB" "$GRAVEYARD" 2>/dev/null
+chmod 777 "$DIR_JB" 2>/dev/null
+
+# 把任何形态的「原版有杂音模块」移出加载路径（.dylib / .plist / .vmaq-backup / .vmaq-off）
+for f in "$DL/VolumeManagerAudioQueue.dylib" \
+         "$DL/VolumeManagerAudioQueue.plist" \
+         "$DL/VolumeManagerAudioQueue.dylib.vmaq-backup" \
+         "$DL/VolumeManagerAudioQueue.plist.vmaq-backup" \
+         "$DL/VolumeManagerAudioQueue.dylib.vmaq-off" \
+         "$DL/VolumeManagerAudioQueue.plist.vmaq-off" ; do
+    if [ -e "$f" ]; then
+        if mv -f "$f" "$GRAVEYARD/" 2>/dev/null; then
+            echo "  已移出加载路径：$(basename "$f")"
+        else
+            echo "  警告 — 无法移动 $(basename "$f")，它会继续被加载（可能出杂音）！"
+        fi
+    fi
+done
+
+# ── 配置：创建/修正真实目录 + 同步兜底副本 ──────────────────────────────
+SRC=""
+for c in "$DIR_JB/volumeInfo.plist" \
+         "$DIR_PLAIN/volumeInfo.plist" \
+         "$DIR_JBROOT/volumeInfo.plist" \
+         /var/mobile/Library/Preferences/volumeInfo.plist ; do
+    if [ -f "$c" ]; then SRC="$c"; break; fi
+done
+
+if [ -n "$SRC" ]; then
+    cp -f "$SRC" "$SYNCED" 2>/dev/null
+    chown mobile:mobile "$SYNCED" 2>/dev/null
+    chmod 644 "$SYNCED" 2>/dev/null
+    echo "配置已找到 → $SRC"
+    echo "  已同步副本 → $SYNCED"
+else
+    echo "提示 — 尚未找到 volumeInfo.plist（全新安装时正常）。"
+    echo "        打开一次「设置 → VolumeManager」随便改一个 App 的音量即可生成，"
+    echo "        期望位置：$DIR_JB/volumeInfo.plist"
+fi
+
+# ── 调试旁路样例（默认不启用） ──────────────────────────────────────────
+S="$DIR_JB/vmaq-force.txt.sample"
+if [ ! -f "$S" ]; then
+    printf '0.3\n' > "$S" 2>/dev/null
+    chmod 666 "$S" 2>/dev/null
+fi
+
+# ── 清理「同名但少个 /jb」的旧目录 ──────────────────────────────────────
+#     这两个路径**是两个不同的目录**，但在 Filza 里看着几乎一样，极易混淆
+#     （v0.4.0 时代到处写日志，在裸路径留下了这个空壳）。
+#     只删我们自己写的 vmaq.log；目录里若还有别的东西一律不动。
+if [ -d "$DIR_PLAIN" ]; then
+    if [ ! -f "$DIR_PLAIN/volumeInfo.plist" ]; then
+        if [ -f "$DIR_PLAIN/vmaq.log" ]; then
+            rm -f "$DIR_PLAIN/vmaq.log" 2>/dev/null && \
+                echo "已清理过期日志 $DIR_PLAIN/vmaq.log"
+        fi
+        if rmdir "$DIR_PLAIN" 2>/dev/null; then
+            echo "已移除同名空目录 $DIR_PLAIN"
+            echo "  （它和 $DIR_JB 其实是两个地方，后者才是真目录）"
+        fi
+    else
+        echo "注意 — $DIR_PLAIN 里有 volumeInfo.plist，保留不动"
+    fi
+fi
+
+# ── Orion 运行时自检（本包依赖 dev.theos.orion） ────────────────────────
+ORION=/var/jb/Library/Frameworks/Orion.framework/Orion
+if [ -f "$ORION" ]; then
+    echo "Orion 运行时：已就绪（$ORION）"
+else
+    echo ""
+    echo "!! 未检测到 Orion 运行时：$ORION"
+    echo "   本包带的 HUD / 设置面板是 Swift + Orion 编译的，缺少它会在 respring 后不显示。"
+    echo "   请用 Sileo 安装依赖 dev.theos.orion（在 Theos 官方源里），"
+    echo "   或手动安装 Orion Runtime 的 deb 后再 respring。"
+fi
+
+echo ""
+echo "VolManAudioQueue Full 1.0.0: 安装完成。请执行一次 respring（注销）使改动生效。"
+echo "  日志文件：$DIR_JB/vmaq.log"
+exit 0

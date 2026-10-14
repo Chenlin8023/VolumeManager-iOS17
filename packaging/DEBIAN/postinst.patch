@@ -1,0 +1,114 @@
+#!/bin/sh
+# ============================================================================
+# VolManAudioQueue 1.0.0 安装后脚本
+#
+#   1) 把原版 VolumeManagerAudioQueue 模块（dylib + plist）改名停用
+#      —— 它是杂音的来源（替换渲染回调却硬按 Float32 逐样本处理）
+#   2) 按原版 postinst 的做法，创建/修正 Rootless 真实数据目录：
+#          /var/jb/var/mobile/Library/VolumeManager-sunshinesong   ← 真实目录
+#          /var/mobile/Library/VolumeManager-sunshinesong          ← 兼容目录
+#      原版 postinst 用的是 ROOT_PREFIX=/var/jb，所以真实目录带 /var/jb 前缀。
+#      这一步是 v0.3.0「找不到配置」的根因修复。
+#   3) 把 volumeInfo.plist 同步一份到
+#          /var/mobile/Library/Preferences/com.local.volmanaudioqueue.appvolume.plist
+#      作为沙箱内 App 也能读到的兜底副本。
+#
+# 备份后缀 .vmaq-backup；卸载时 postrm 会自动还原。
+# ============================================================================
+
+JB=/var/jb
+DL="$JB/Library/MobileSubstrate/DynamicLibraries"
+
+DIR_JB=/var/jb/var/mobile/Library/VolumeManager-sunshinesong
+DIR_PLAIN=/var/mobile/Library/VolumeManager-sunshinesong
+DIR_JBROOT=/.jbroot/var/mobile/Library/VolumeManager-sunshinesong
+SYNCED=/var/mobile/Library/Preferences/com.local.volmanaudioqueue.appvolume.plist
+
+disable_one() {
+    src="$1"
+    bak="$src.vmaq-backup"
+    alt="$src.vmaq-off"
+    [ -f "$src" ] || return 0
+    if [ ! -f "$bak" ]; then
+        if mv "$src" "$bak" 2>/dev/null; then
+            echo "VolManAudioQueue: 已停用原版 $(basename "$src")  →  $(basename "$bak")"
+            return 0
+        fi
+        echo "VolManAudioQueue: 警告 — 无法停用 $(basename "$src")"
+        return 1
+    fi
+    # 备份已存在但原名又出现了（用户手动恢复过）：再加一个后缀挪走，避免两版同时加载
+    if [ ! -f "$alt" ]; then
+        mv "$src" "$alt" 2>/dev/null && \
+            echo "VolManAudioQueue: 原名再次出现，已挪为 $(basename "$alt")"
+    else
+        echo "VolManAudioQueue: 警告 — $(basename "$src") 仍存在且备份位已占用，请手动处理"
+    fi
+    return 0
+}
+
+echo "VolManAudioQueue: 停用原版有杂音的模块…"
+disable_one "$DL/VolumeManagerAudioQueue.dylib"
+disable_one "$DL/VolumeManagerAudioQueue.plist"
+
+# ── 2. 目录（与原版一致的 777，保证任何身份的进程都能读写） ──────────────
+#     只创建主目录（/var/jb 前缀），不再到处建目录 ——
+#     否则会在裸路径造出一个只有 vmaq.log 的空目录，容易把路径看混。
+echo "VolManAudioQueue: 准备数据目录…"
+mkdir -p "$DIR_JB"    2>/dev/null
+chmod 777 "$DIR_JB"     2>/dev/null
+
+# ── 3. 配置同步副本（沙箱内 App 的读取兜底） ─────────────────────────────
+SRC=""
+for c in "$DIR_JB/volumeInfo.plist" \
+         "$DIR_PLAIN/volumeInfo.plist" \
+         "$DIR_JBROOT/volumeInfo.plist" \
+         /var/mobile/Library/Preferences/volumeInfo.plist ; do
+    if [ -f "$c" ]; then SRC="$c"; break; fi
+done
+
+if [ -n "$SRC" ]; then
+    cp -f "$SRC" "$SYNCED" 2>/dev/null
+    chown mobile:mobile "$SYNCED" 2>/dev/null
+    chmod 644 "$SYNCED" 2>/dev/null
+    echo "VolManAudioQueue: 配置已找到 → $SRC"
+    echo "                  已同步副本 → $SYNCED"
+else
+    echo "VolManAudioQueue: 提示 — 未找到 volumeInfo.plist。"
+    echo "                  若插件原本可用，它的配置应在："
+    echo "                      $DIR_JB/volumeInfo.plist"
+    echo "                  请用 Filza 确认后再 respring。"
+fi
+
+# ── 4. 调试旁路（默认不启用；需要时把 .sample 改名即可） ─────────────────
+S="$DIR_JB/vmaq-force.txt.sample"
+if [ -d "$DIR_JB" ] && [ ! -f "$S" ]; then
+    printf '0.3\n' > "$S" 2>/dev/null
+    chmod 666 "$S" 2>/dev/null
+fi
+
+# ── 5. 清理「同名但少个 /jb」的旧目录 ───────────────────────────────────
+#     下面这两个路径**是两个不同的目录**，但在 Filza 里看着几乎一样，
+#     极易混淆（v0.4.0 时代到处写日志，在裸路径留下了这个空壳）。
+#     只删我们自己写的 vmaq.log；目录里若还有别的东西一律不动。
+if [ -d "$DIR_PLAIN" ]; then
+    if [ ! -f "$DIR_PLAIN/volumeInfo.plist" ]; then
+        if [ -f "$DIR_PLAIN/vmaq.log" ]; then
+            rm -f "$DIR_PLAIN/vmaq.log" 2>/dev/null && \
+                echo "VolManAudioQueue: 已清理过期日志 $DIR_PLAIN/vmaq.log"
+        fi
+        if rmdir "$DIR_PLAIN" 2>/dev/null; then
+            echo "VolManAudioQueue: 已移除同名空目录 $DIR_PLAIN"
+            echo "                  （它和 $DIR_JB 其实是两个地方，后者才是真目录）"
+        fi
+    else
+        echo "VolManAudioQueue: 注意 — $DIR_PLAIN 里有 volumeInfo.plist，保留不动"
+    fi
+fi
+
+echo ""
+echo "VolManAudioQueue 1.0.0: 安装完成。请执行一次 respring（注销）使改动生效。"
+echo "  日志文件：$DIR_JB/vmaq.log"
+echo "  （Filza 的「越狱根」视角下同一文件显示为"
+echo "    /var/mobile/Library/VolumeManager-sunshinesong/vmaq.log）"
+exit 0
