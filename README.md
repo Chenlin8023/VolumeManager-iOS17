@@ -6,7 +6,18 @@
 > 已在 **iPhone 15 Pro / iOS 17.2.1 / Rootless 越狱** 实测通过：
 > 不进安全模式、无杂音、多 App 同时播放正常、每个 App 的音量单独生效且即时刷新。
 
-**当前版本：v1.1.3**（音量引擎 1.1.3 + 设置面板净化模块 1.0.3）
+**当前版本：v1.2.0**（音量引擎 1.2.0 + 设置面板净化模块 1.1.0）
+
+v1.2.0 变更：
+
+- 新增**混音策略层**：挂钩 `AVAudioSession` 的 `setActive:withOptions:error:`、`setCategory:`
+  四个变体与私有 `privateSet*` 入口，在每次会话激活前把会话重新声明为 `MixWithOthers`，
+  让多个 App 真正同时播放（细节见下方「混音层」一节）；
+- 混音层与音量配置**完全解耦、无条件安装**：只要有一个参与播放的 App 不是混音的，
+  它一激活就会把别人掐掉，所以不能只在「有音量配置」的 App 里装；
+- 净化模块升级为**双保险**：全量包在打包时把原版面板二进制里的推广文案与链接
+  **等长清空并重新签名**，运行时再把整条 specifier 摘掉并拦截残留按钮与链接。
+  即使 Preferences 进程收不到注入，静态层依然生效。
 
 v1.1.3 变更：
 
@@ -48,19 +59,62 @@ v1.1.1 变更：
 * **三重刷新机制** —— 监听全部 3 个通知 + 0.5 秒文件时间戳轮询兜底 + 备用层（AVPlayer /
   AVAudioPlayer / AVSampleBufferAudioRenderer）基准音量回写，做到改完即生效。
 
-另外还附带一个 **设置面板净化模块**（`VolManPrefsClean`）：
+另外还附带一个 **设置面板净化模块**（`VolManPrefsClean`），两层实现：
 
-原设置界面里有一堆和功能无关的东西 —— 支付宝打赏条目和收款二维码链接、GitHub 关注链接、
-查看源码链接、Sileo 源、反盗版声明，以及面板末尾一大段针对其他插件作者的文字。
-本模块在运行时把这些条目从列表里摘掉，**功能开关一个不少**（总开关、HUD 显示条件、
-混音选项、应用音量列表全部保留）。
+- **静态层（只在全量包）**：打包时把原版面板二进制 `VolumeManagerPrefs` 里的
+  推广文案、收款 / 源码 / Sileo 链接、以及面板末尾那段针对其他作者的长文按
+  **字节等长**清空 —— 长度与结尾 NUL 都不变，Swift 侧的字面量长度常量仍然成立；
+  4 条 URL 换成**等长的合法占位链接**（若清成空格，Swift 里 `URL(string:)!`
+  会返回 nil，点击即崩），最后用 `ldid -S` 重新签名。
+- **运行层**：在 `-setSpecifiers:` / `-specifiers` / `-buttonEvent:` 上摘除条目，
+  并拦截 `alipay` / `github` / `sileo` 链接；顺带把作者留下的调试后缀
+  `启用混响(isEnabled mixable)` 改成「启用混音」。
 
-> **实测限制（很重要）**：在 **RootHide 系越狱 + 按 App 白名单注入**的环境下，
-> 系统「设置」进程可能根本收不到注入 —— 即使白名单里已经把「设置」勾选打开。
-> 已在 iPhone 15 Pro / iOS 17.2.1 / RootHide 实测：同期 `irisin`、`Filza`、`Sileo`、
-> 以及各家 Widget 扩展全部正常注入，唯独 `com.apple.Preferences` 一次都没有。
-> 这种情况下本模块不会生效，且不会造成任何副作用。
-> 若你的越狱默认全量注入（不搞白名单），一般可以直接工作。
+**功能开关一个不少**（总开关、混音选项、HUD 显示条件、应用音量列表全部保留）。
+
+> **诊断信息**：运行层会把状态写进 Preferences 自己的偏好域，用 Filza 打开
+> `/var/mobile/Library/Preferences/com.apple.Preferences.plist`，查
+> `VolManPrefsCleanStatus` 即可看到 `injected` / `hooks base=1 root=1 url=1` /
+> `filtered 21→14 dropped=7`。在 RootHide + 白名单注入环境下，如果「设置」进程
+> 收不到注入，运行层不生效，但全量包的静态层仍然会把内容清掉。
+
+---
+
+## 混音层（v1.2.0）
+
+原版 VolumeManager 只做「每 App 音量」，**并不保证多个 App 能同时出声**。
+v1.2.0 增加了一层独立的混音策略（思路来自对 AudioMix 的逆向，代码完全重写）：
+
+- 真正决定「会不会打断别人」的时刻是 `setActive:YES`，所以在调用原实现之前，
+  把当前会话重新声明成 `MixWithOthers`；
+- 覆盖公有 `setCategory:` 的四个变体、`setCategory:error:`、`setMode:`，
+  以及私有 `privateSetOptions:forCategory:error:`、
+  `privateSetCategoryWithOptions:modes:routeSharingPolicy:options:`、
+  `isPrimary`、`silenceOutput:error:` —— 私有方法全部**运行期探测，存在才挂**；
+- 保留 App 的 `mode` / `routeSharingPolicy` / 已有 options；
+  `Record` 完全放行，`PlayAndRecord` 只加混音位、不改类别；
+- 与音量配置解耦：无论该 App 有没有音量配置，混音钩子都会安装。
+
+配置（任一文件，找不到就用默认值）：
+
+```
+<数据目录>/mixInfo.plist
+/var/mobile/Library/Preferences/com.local.volmanaudioqueue.mix.plist
+/var/mobile/Library/Preferences/com.sunshinesong.volume-manager-prefs.plist
+/tmp/mixInfo.plist
+```
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `vmMixEnabled` | YES | 混音层总开关 |
+| `vmMixGuard` | NO | 是否拦截 `silenceOutput:error:`（激进防守，开启后可能出现「通话时音乐不停」） |
+| `vmMixExcludedApps` | 空 | 不参与混音的 bundle id 数组 |
+
+紧急关闭：在数据目录放一个空文件 `vmaq-mix-off`，重启 App 生效（不用重装）。
+
+> **与原版 `isEnabledMixable` 的关系**：原版主模块里那个开关会**无条件**把类别改成
+> `Playback + MixWithOthers`，对「第一个发声的 App」也生效，但会让录音 / 录像类
+> App 失去录音能力。它可以与本混音层共存，按需取舍。
 
 ---
 
@@ -76,6 +130,8 @@ src/
     VolManPrefsClean.xm
     Makefile
     VolManPrefsClean.plist 注入过滤器（Bundles = com.apple.UIKit）
+tools/
+  redact_prefs.py          面板二进制静态净化（等长替换 + 重新签名，全量包打包时调用）
 packaging/
   control.patch            补丁包控制信息（建议装在已装原版插件之上）
   control.full             全量包控制信息（一个 deb 装完整套）
@@ -116,6 +172,15 @@ cd ../VolManPrefsClean
 make package FINALPACKAGE=1
 ```
 
+全量包还需要一步**静态净化**（把原版面板二进制里的推广文案与链接清掉），
+必须在 `make package` 之前执行，否则发布出去的包里仍带着原文案：
+
+```bash
+BIN=layout/Library/PreferenceBundles/VolumeManagerPrefs.bundle/VolumeManagerPrefs
+python3 tools/redact_prefs.py "$BIN"          # 等长替换，长度不变
+"$THEOS/toolchain/linux/iphone/bin/ldid" -S "$BIN"   # 重新签名
+```
+
 关键编译选项（不要随意改）：
 
 ```make
@@ -146,8 +211,9 @@ THEOS_PACKAGE_SCHEME = rootless   # 根前缀 /var/jb
 * 只处理**媒体播放类**音频（AudioToolbox / AVFoundation 路径）。系统提示音、来电铃声不在此列。
 * 渲染回调对**不认识的采样格式**会主动放弃处理（放行原始数据），这些格式下音量不会变化，
   但也不会出现杂音。
-* 设置面板的那段净化逻辑是按**文案匹配**做的。原作者若日后改了界面文案，净化可能失效，
-  但不会造成崩溃。
+* 净化分两层：静态层按**原文案**定位，原作者若改版会导致构建期直接报错中止
+  （不会产出半成品包）；运行层按**关键词**兜底，但改版后仍可能漏掉新文案。
+* 混音层只在**会话激活时**改写策略，因此改造前就已经在放音的 App 需要重启才会走新逻辑。
 
 ---
 

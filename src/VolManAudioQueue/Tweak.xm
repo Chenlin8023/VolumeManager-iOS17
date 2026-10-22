@@ -1,6 +1,10 @@
 /*
- * VolManAudioQueue v1.1.1 —— VolumeManager「每 App 音量」模块重写版
+ * VolManAudioQueue v1.2.0 —— VolumeManager「每 App 音量」模块重写版
  * ============================================================================
+ * v1.2.0  新增「混音策略层」：挂钩 AVAudioSession 的 setActive / setCategory 系列，
+ *         在每次激活前把会话重新声明成 MixWithOthers，让多个 App 真正同时播放。
+ *         该层与音量配置解耦、无条件安装；私有 API 探测后才挂；默认开启，
+ *         可用 vmMixEnabled / vmMixGuard / vmMixExcludedApps 或 vmaq-mix-off 关闭。
  * v1.1.1  1) 音量值兼容字符串存储（设备上实测出现过 volume = "0.1951..."）；
  *         2) 日志版本串改为 v1.1.1，避免与历史日志混淆。
  * 变更历史
@@ -56,6 +60,8 @@
 #import <Foundation/Foundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <AVFoundation/AVFoundation.h>
+#import <objc/runtime.h>
+#import <substrate.h>
 #import <dispatch/dispatch.h>
 #import <pthread.h>
 #import <stdlib.h>
@@ -762,6 +768,436 @@ static OSStatus VMRenderCB(void *inRefCon,
 // ===========================================================================
 // 挂钩组：只有确认「本进程确实需要改音量」时才安装
 // ===========================================================================
+// ===========================================================================
+// 混音策略层（L1）
+//
+//   目标：让多个 App 的 AVAudioSession 同时保持「可混音」状态，
+//         系统在激活新会话时就不会去打断已经在放音的那个。
+//
+//   核心结论（来自 AudioMix 0.0.10 的反汇编验证）：
+//     · 决定「会不会打断别人」的时刻是 setActive:YES，不是设类别的那一刻；
+//     · 所以在调用原实现之前，把当前会话重新声明成 MixWithOthers 即可；
+//     · 改 setCategory 只是补漏，改音频渲染数据对混音完全无效、也不必要。
+//
+//   与 AudioMix 的差异（都是为了尽量少改变别人的行为）：
+//     ① 保留 App 的 mode / routeSharingPolicy：激活前用公有 getter 现读，
+//        并用 setCategory:mode:routeSharingPolicy:options:error: 原样带回；
+//        AudioMix 只传 category，会把 MoviePlayback / VoiceChat 重置成 Default。
+//     ② options 用「已知值 | MixWithOthers」，不丢弃 allowBluetooth 等路由位；
+//        AudioMix 直接覆盖成 1。
+//     ③ 录音类不改类别：Record 完全放行，PlayAndRecord 只加混音位。
+//     ④ 私有 API 全部 class_getInstanceMethod 探测，不存在就不挂。
+//     ⑤ 不用 libSparkAppList（240KB + SpringBoard 注入），排除表自己读 plist。
+//
+//   配置（任选一处，找不到就用默认值）：
+//     <数据目录>/mixInfo.plist
+//     /var/mobile/Library/Preferences/com.local.volmanaudioqueue.mix.plist
+//     /var/mobile/Library/Preferences/com.sunshinesong.volume-manager-prefs.plist
+//     /tmp/mixInfo.plist
+//   键：
+//     vmMixEnabled        BOOL  默认 YES，混音层总开关
+//     vmMixGuard          BOOL  默认 NO，是否拦截 silenceOutput（激进防守）
+//     vmMixExcludedApps   array 不参与混音的 bundle id
+//   另：<数据目录>/vmaq-mix-off 文件存在即强制关闭（免重装调试用）
+// ===========================================================================
+
+static volatile int gMixEnabled    = 1;   // 混音层总开关
+static volatile int gMixGuard      = 0;   // silenceOutput 拦截（默认关）
+static volatile int gMixExcluded   = 0;   // 本 App 在排除表里
+static volatile int gMixHooked     = 0;   // 已安装钩子
+static volatile int gMixActCount   = 0;   // 已改写过几次（用于日志节流）
+static NSObject   *gMixLock        = nil;
+
+// 会话状态缓存（AVAudioSession 在进程内实际是单例，但仍按「最后一次调用」记录）
+static NSString   *gMixCat         = nil;
+static NSString   *gMixMode        = nil;
+static NSUInteger  gMixPolicy      = 0;
+static NSUInteger  gMixOptions     = 0;
+
+#define VM_CAT_RINGTONE  @"AVAudioSessionCategoryRingtone"
+
+// ---- 原实现指针 ---------------------------------------------------------
+static BOOL (*vm_orig_setActive)(id, SEL, BOOL, NSUInteger, NSError **);
+static BOOL (*vm_orig_setCatErr)(id, SEL, NSString *, NSError **);
+static BOOL (*vm_orig_setCatOpts)(id, SEL, NSString *, NSUInteger, NSError **);
+static BOOL (*vm_orig_setCatMode)(id, SEL, NSString *, NSString *, NSUInteger, NSError **);
+static BOOL (*vm_orig_setCatModePolicy)(id, SEL, NSString *, NSString *, NSUInteger, NSUInteger, NSError **);
+static BOOL (*vm_orig_setMode)(id, SEL, NSString *, NSError **);
+static BOOL (*vm_orig_privSetOptions)(id, SEL, NSUInteger, NSString *, NSError **);
+static BOOL (*vm_orig_privSetCat)(id, SEL, NSString *, id, NSUInteger, NSUInteger);
+static BOOL (*vm_orig_isPrimary)(id, SEL);
+static BOOL (*vm_orig_silenceOutput)(id, SEL, NSUInteger, NSError **);
+
+// ---- 配置 ---------------------------------------------------------------
+static NSArray<NSString *> *VMMixConfigCandidates(void) {
+    NSMutableArray *a = [NSMutableArray array];
+    for (NSString *d in VMDirs()) {
+        [a addObject:[d stringByAppendingPathComponent:@"mixInfo.plist"]];
+    }
+    [a addObject:@"/var/mobile/Library/Preferences/com.local.volmanaudioqueue.mix.plist"];
+    [a addObject:@"/var/jb/var/mobile/Library/Preferences/com.local.volmanaudioqueue.mix.plist"];
+    [a addObject:@"/var/.jbroot/var/mobile/Library/Preferences/com.local.volmanaudioqueue.mix.plist"];
+    [a addObject:kVMPrefsPath];
+    [a addObject:[@"/var/jb" stringByAppendingString:kVMPrefsPath]];
+    [a addObject:[@"/.jbroot" stringByAppendingString:kVMPrefsPath]];
+    [a addObject:@"/tmp/mixInfo.plist"];
+    return a;
+}
+
+static BOOL VMMixKillSwitchPresent(void) {
+    for (NSString *d in VMDirs()) {
+        if ([d length] == 0) continue;
+        struct stat st;
+        memset(&st, 0, sizeof(st));
+        if (VMStat([d stringByAppendingPathComponent:@"vmaq-mix-off"], &st) == 0) return YES;
+    }
+    return NO;
+}
+
+static void VMMixLoadConfig(NSString *bid) {
+    NSString *src = nil;
+    NSDictionary *d = nil;
+
+    for (NSString *p in VMMixConfigCandidates()) {
+        @try {
+            NSDictionary *r = [NSDictionary dictionaryWithContentsOfFile:p];
+            if (![r isKindOfClass:[NSDictionary class]] || r.count == 0) continue;
+            // 只认带混音键的文件，避免把 volumeInfo.plist 当成混音配置
+            if (r[@"vmMixEnabled"] || r[@"vmMixGuard"] || r[@"vmMixExcludedApps"]) {
+                d = r; src = p; break;
+            }
+        } @catch (NSException *e) { }
+    }
+
+    BOOL en = YES;
+    BOOL gd = NO;
+    if (d) {
+        id v = d[@"vmMixEnabled"];
+        if ([v respondsToSelector:@selector(boolValue)]) en = [v boolValue];
+        v = d[@"vmMixGuard"];
+        if ([v respondsToSelector:@selector(boolValue)]) gd = [v boolValue];
+
+        id ex = d[@"vmMixExcludedApps"];
+        if ([ex isKindOfClass:[NSArray class]] && bid.length) {
+            for (id one in (NSArray *)ex) {
+                if ([one isKindOfClass:[NSString class]] && [one isEqualToString:bid]) {
+                    gMixExcluded = 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (VMMixKillSwitchPresent()) {
+        en = NO;
+        src = src ? [src stringByAppendingString:@" +vmaq-mix-off"] : @"vmaq-mix-off";
+    }
+
+    gMixEnabled = en ? 1 : 0;
+    gMixGuard   = gd ? 1 : 0;
+
+    VMLog(@"[mix] 配置=%@ 开关=%d 防守=%d 排除=%d", src ?: @"(默认：开/不防守)",
+          gMixEnabled, gMixGuard, gMixExcluded);
+}
+
+// ---- 状态读写 -----------------------------------------------------------
+static void VMMixRemember(NSString *cat, NSString *mode, NSUInteger policy, NSUInteger opts) {
+    if (!gMixLock) return;
+    @synchronized (gMixLock) {
+        if (cat)  gMixCat  = [cat copy];
+        if (mode) gMixMode = [mode copy];
+        gMixPolicy  = policy;
+        gMixOptions = opts;
+    }
+}
+
+static NSString *VMMixCachedMode(void) {
+    if (!gMixLock) return nil;
+    @synchronized (gMixLock) { return gMixMode; }
+}
+
+static NSUInteger VMMixCachedPolicy(void) {
+    if (!gMixLock) return 0;
+    @synchronized (gMixLock) { return gMixPolicy; }
+}
+
+static NSUInteger VMMixCachedOptions(void) {
+    if (!gMixLock) return 0;
+    @synchronized (gMixLock) { return gMixOptions; }
+}
+
+// ---- 判定 ---------------------------------------------------------------
+static BOOL VMMixConfigActive(void) {
+    return (gMixEnabled && !gMixExcluded) ? YES : NO;
+}
+
+// 「别的 App 正在放音」：iOS 17 起再叠加一个官方提示位，判定更准。
+static BOOL VMMixOtherPlaying(void) {
+    @try {
+        AVAudioSession *s = [AVAudioSession sharedInstance];
+        BOOL other = s.isOtherAudioPlaying;
+        // 不用 @available：本机 Theos 工具链缺少 ___isOSVersionAtLeast，
+        // 改成能力探测，效果等价且不会引入链接期符号。
+        if ([s respondsToSelector:@selector(secondaryAudioShouldBeSilencedHint)]) {
+            other = other || s.secondaryAudioShouldBeSilencedHint;
+        }
+        return other ? YES : NO;
+    } @catch (NSException *e) {
+        return NO;
+    }
+}
+
+// 会被系统判定为「独占/会抢焦点」的类别 → 换成可混音的 Playback。
+// 录音类（Record / PlayAndRecord）一律不动类别。
+static NSString *VMMixNormalizeCategory(NSString *cat) {
+    if (![cat isKindOfClass:[NSString class]] || cat.length == 0) return cat;
+    if ([cat isEqualToString:AVAudioSessionCategorySoloAmbient] ||
+        [cat isEqualToString:AVAudioSessionCategoryAmbient] ||
+        [cat isEqualToString:VM_CAT_RINGTONE]) {
+        return AVAudioSessionCategoryPlayback;
+    }
+    return cat;
+}
+
+// 用原实现重新声明会话；保留 mode / policy / options。
+static BOOL VMMixApply(AVAudioSession *s, NSString *cat, NSString *mode,
+                       NSUInteger policy, NSUInteger opts) {
+    if (!s || !cat) return NO;
+    NSUInteger o = opts | AVAudioSessionCategoryOptionMixWithOthers;
+    @try {
+        if (mode && vm_orig_setCatModePolicy) {
+            return vm_orig_setCatModePolicy(s, @selector(setCategory:mode:routeSharingPolicy:options:error:),
+                                            cat, mode, policy, o, NULL);
+        }
+        if (mode && vm_orig_setCatMode) {
+            return vm_orig_setCatMode(s, @selector(setCategory:mode:options:error:),
+                                      cat, mode, o, NULL);
+        }
+        if (vm_orig_setCatOpts) {
+            return vm_orig_setCatOpts(s, @selector(setCategory:withOptions:error:), cat, o, NULL);
+        }
+    } @catch (NSException *e) { }
+    return NO;
+}
+
+// ---- setActive 之前的统一改写 -------------------------------------------
+static void VMMixReassert(AVAudioSession *s, const char *why) {
+    @try {
+        NSString *cat = s.category;
+        if (cat.length == 0) return;
+        if ([cat isEqualToString:AVAudioSessionCategoryRecord]) return;   // 纯录音，别碰
+
+        NSString *mode = s.mode ?: AVAudioSessionModeDefault;
+        NSUInteger policy = 0;
+        if ([s respondsToSelector:@selector(routeSharingPolicy)]) {
+            policy = (NSUInteger)s.routeSharingPolicy;
+        }
+        NSUInteger opts = VMMixCachedOptions();
+        NSString *ncat  = VMMixNormalizeCategory(cat);
+
+        VMMixRemember(ncat, mode, policy, opts);
+        VMMixApply(s, ncat, mode, policy, opts);
+
+        if (gMixActCount < 60) {
+            gMixActCount++;
+            VMLog(@"[mix] %s 前置改写 cat=%@(原 %@) mode=%@ policy=%lu opts=%lu",
+                  why, ncat, cat, mode, (unsigned long)policy,
+                  (unsigned long)(opts | AVAudioSessionCategoryOptionMixWithOthers));
+        }
+    } @catch (NSException *e) { }
+}
+
+// ---- 钩子实现 -----------------------------------------------------------
+static BOOL vm_mix_setActive(id self, SEL _cmd, BOOL active, NSUInteger options, NSError **error) {
+    if (active && VMMixConfigActive() && VMMixOtherPlaying()) {
+        VMMixReassert((AVAudioSession *)self, "setActive");
+    }
+    return vm_orig_setActive ? vm_orig_setActive(self, _cmd, active, options, error) : NO;
+}
+
+static BOOL vm_mix_setCategoryError(id self, SEL _cmd, NSString *cat, NSError **error) {
+    if (VMMixConfigActive()) {
+        // setCategory:error: 等价于默认 mode + 默认 options
+        VMMixRemember(cat, AVAudioSessionModeDefault, 0, 0);
+        if (VMMixOtherPlaying()) {
+            NSString *n = VMMixNormalizeCategory(cat);
+            VMMixRemember(n, AVAudioSessionModeDefault, 0, AVAudioSessionCategoryOptionMixWithOthers);
+            if (vm_orig_setCatOpts) {
+                if (gMixActCount < 60) {
+                    gMixActCount++;
+                    VMLog(@"[mix] setCategory:error: 改写 %@ → %@ + Mix", cat, n);
+                }
+                return vm_orig_setCatOpts(self, @selector(setCategory:withOptions:error:),
+                                          n, AVAudioSessionCategoryOptionMixWithOthers, error);
+            }
+        }
+    }
+    return vm_orig_setCatErr ? vm_orig_setCatErr(self, _cmd, cat, error) : NO;
+}
+
+static BOOL vm_mix_setCategoryOptions(id self, SEL _cmd, NSString *cat,
+                                      NSUInteger options, NSError **error) {
+    if (VMMixConfigActive()) {
+        VMMixRemember(cat, AVAudioSessionModeDefault, 0, options);
+        if (VMMixOtherPlaying()) {
+            NSString *n = VMMixNormalizeCategory(cat);
+            NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
+            VMMixRemember(n, AVAudioSessionModeDefault, 0, o);
+            if (gMixActCount < 60) {
+                gMixActCount++;
+                VMLog(@"[mix] setCategory:withOptions: 改写 %@/%lu → %@/%lu", cat,
+                      (unsigned long)options, n, (unsigned long)o);
+            }
+            if (vm_orig_setCatOpts) return vm_orig_setCatOpts(self, _cmd, n, o, error);
+        }
+    }
+    return vm_orig_setCatOpts ? vm_orig_setCatOpts(self, _cmd, cat, options, error) : NO;
+}
+
+static BOOL vm_mix_setCategoryMode(id self, SEL _cmd, NSString *cat, NSString *mode,
+                                   NSUInteger options, NSError **error) {
+    if (VMMixConfigActive()) {
+        VMMixRemember(cat, mode, 0, options);
+        if (VMMixOtherPlaying()) {
+            NSString *n = VMMixNormalizeCategory(cat);
+            NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
+            VMMixRemember(n, mode, 0, o);
+            if (vm_orig_setCatMode) return vm_orig_setCatMode(self, _cmd, n, mode, o, error);
+        }
+    }
+    return vm_orig_setCatMode ? vm_orig_setCatMode(self, _cmd, cat, mode, options, error) : NO;
+}
+
+static BOOL vm_mix_setCategoryModePolicy(id self, SEL _cmd, NSString *cat, NSString *mode,
+                                         NSUInteger policy, NSUInteger options, NSError **error) {
+    if (VMMixConfigActive()) {
+        VMMixRemember(cat, mode, policy, options);
+        if (VMMixOtherPlaying()) {
+            NSString *n = VMMixNormalizeCategory(cat);
+            NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
+            VMMixRemember(n, mode, policy, o);
+            if (vm_orig_setCatModePolicy) {
+                return vm_orig_setCatModePolicy(self, _cmd, n, mode, policy, o, error);
+            }
+        }
+    }
+    return vm_orig_setCatModePolicy
+         ? vm_orig_setCatModePolicy(self, _cmd, cat, mode, policy, options, error) : NO;
+}
+
+// 有些 App 先设类别、再单独调 setMode:，必须跟住，否则激活时会把 mode 改回 Default
+static BOOL vm_mix_setMode(id self, SEL _cmd, NSString *mode, NSError **error) {
+    if (VMMixConfigActive()) VMMixRemember(nil, mode, VMMixCachedPolicy(), VMMixCachedOptions());
+    return vm_orig_setMode ? vm_orig_setMode(self, _cmd, mode, error) : NO;
+}
+
+// 私有：-privateSetOptions:forCategory:error:
+static BOOL vm_mix_privSetOptions(id self, SEL _cmd, NSUInteger options,
+                                  NSString *cat, NSError **error) {
+    if (VMMixConfigActive()) {
+        VMMixRemember(cat, VMMixCachedMode(), VMMixCachedPolicy(), options);
+        if (VMMixOtherPlaying()) {
+            NSString *n = VMMixNormalizeCategory(cat);
+            NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
+            VMMixRemember(n, VMMixCachedMode(), VMMixCachedPolicy(), o);
+            if (vm_orig_privSetOptions) return vm_orig_privSetOptions(self, _cmd, o, n, error);
+        }
+    }
+    return vm_orig_privSetOptions ? vm_orig_privSetOptions(self, _cmd, options, cat, error) : NO;
+}
+
+// 私有：-privateSetCategoryWithOptions:modes:routeSharingPolicy:options:
+//   实测签名：(self, _cmd, category, modes, policy, options)
+static BOOL vm_mix_privSetCat(id self, SEL _cmd, NSString *cat, id modes,
+                              NSUInteger policy, NSUInteger options) {
+    if (VMMixConfigActive()) {
+        VMMixRemember(cat, VMMixCachedMode(), policy, options);
+        if (VMMixOtherPlaying()) {
+            NSString *n = VMMixNormalizeCategory(cat);
+            NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
+            VMMixRemember(n, VMMixCachedMode(), policy, o);
+            if (vm_orig_privSetCat) return vm_orig_privSetCat(self, _cmd, n, modes, policy, o);
+        }
+    }
+    return vm_orig_privSetCat ? vm_orig_privSetCat(self, _cmd, cat, modes, policy, options) : NO;
+}
+
+// 私有：-isPrimary —— 回答之前先把自己的「攻击性类别」换掉
+static BOOL vm_mix_isPrimary(id self, SEL _cmd) {
+    if (VMMixConfigActive() && VMMixOtherPlaying()) {
+        @try {
+            NSString *cat = [(AVAudioSession *)self category];
+            if ([cat isEqualToString:AVAudioSessionCategoryAmbient] ||
+                [cat isEqualToString:AVAudioSessionCategorySoloAmbient]) {
+                VMMixReassert((AVAudioSession *)self, "isPrimary");
+            }
+        } @catch (NSException *e) { }
+    }
+    return vm_orig_isPrimary ? vm_orig_isPrimary(self, _cmd) : NO;
+}
+
+// 私有：-silenceOutput:error: —— 别的 App 正在放音时，假装「已静音」，实际什么都不做。
+// 默认关闭（gMixGuard=0）：多数两 App 混音场景用不到，开启后可能出现「通话时音乐不停」。
+static BOOL vm_mix_silenceOutput(id self, SEL _cmd, NSUInteger reason, NSError **error) {
+    if (gMixGuard && VMMixConfigActive() && VMMixOtherPlaying()) {
+        if (gMixActCount < 60) {
+            gMixActCount++;
+            VMLog(@"[mix] 拦截 silenceOutput(reason=%lu)，保持播放", (unsigned long)reason);
+        }
+        return NO;
+    }
+    return vm_orig_silenceOutput ? vm_orig_silenceOutput(self, _cmd, reason, error) : NO;
+}
+
+// ---- 安装 ---------------------------------------------------------------
+static void VMMixHookMethod(Class cls, const char *name, IMP hook, IMP *orig) {
+    if (!cls || !name) return;
+    SEL sel = sel_registerName(name);
+    if (!class_getInstanceMethod(cls, sel)) return;   // 该版本没有这个方法 → 不挂
+    MSHookMessageEx(cls, sel, hook, orig);
+}
+
+static void VMMixInstallHooks(void) {
+    Class cls = objc_getClass("AVAudioSession");
+    if (!cls) {
+        VMLog(@"[mix] 本进程没有 AVAudioSession，跳过混音层");
+        return;
+    }
+    if (!gMixLock) gMixLock = [NSObject new];
+
+    // 公有 API（iOS 15+ 全部存在）
+    VMMixHookMethod(cls, "setActive:withOptions:error:",
+                    (IMP)vm_mix_setActive, (IMP *)&vm_orig_setActive);
+    VMMixHookMethod(cls, "setCategory:error:",
+                    (IMP)vm_mix_setCategoryError, (IMP *)&vm_orig_setCatErr);
+    VMMixHookMethod(cls, "setCategory:withOptions:error:",
+                    (IMP)vm_mix_setCategoryOptions, (IMP *)&vm_orig_setCatOpts);
+    VMMixHookMethod(cls, "setCategory:mode:options:error:",
+                    (IMP)vm_mix_setCategoryMode, (IMP *)&vm_orig_setCatMode);
+    VMMixHookMethod(cls, "setCategory:mode:routeSharingPolicy:options:error:",
+                    (IMP)vm_mix_setCategoryModePolicy, (IMP *)&vm_orig_setCatModePolicy);
+    VMMixHookMethod(cls, "setMode:error:",
+                    (IMP)vm_mix_setMode, (IMP *)&vm_orig_setMode);
+
+    // 私有 API（存在才挂）
+    VMMixHookMethod(cls, "privateSetOptions:forCategory:error:",
+                    (IMP)vm_mix_privSetOptions, (IMP *)&vm_orig_privSetOptions);
+    VMMixHookMethod(cls, "privateSetCategoryWithOptions:modes:routeSharingPolicy:options:",
+                    (IMP)vm_mix_privSetCat, (IMP *)&vm_orig_privSetCat);
+    VMMixHookMethod(cls, "isPrimary",
+                    (IMP)vm_mix_isPrimary, (IMP *)&vm_orig_isPrimary);
+    VMMixHookMethod(cls, "silenceOutput:error:",
+                    (IMP)vm_mix_silenceOutput, (IMP *)&vm_orig_silenceOutput);
+
+    gMixHooked = 1;
+    VMLog(@"[mix] 已安装：setActive=%d setCategory=%d/%d/%d/%d priv=%d/%d isPrimary=%d silence=%d",
+          vm_orig_setActive ? 1 : 0,
+          vm_orig_setCatErr ? 1 : 0, vm_orig_setCatOpts ? 1 : 0,
+          vm_orig_setCatMode ? 1 : 0, vm_orig_setCatModePolicy ? 1 : 0,
+          vm_orig_privSetOptions ? 1 : 0, vm_orig_privSetCat ? 1 : 0,
+          vm_orig_isPrimary ? 1 : 0, vm_orig_silenceOutput ? 1 : 0);
+}
+
 %group VMHooks
 
 // ---- 渲染回调包装 -------------------------------------------------------
@@ -1083,7 +1519,7 @@ static void VMStartEngine(void) {
 
             float forced = VMReadForceFile();
 
-            VMLog(@"=== v1.1.1 注入 | bundle=%@ 总开关=%d 跳过=%d 调试旁路=%.3f",
+            VMLog(@"=== v1.2.0 注入 | bundle=%@ 总开关=%d 跳过=%d 调试旁路=%.3f",
                   bid, enabled, skip, (double)forced);
 
             // ① 全量路径探测（一次性，把真相写进日志）
@@ -1106,6 +1542,14 @@ static void VMStartEngine(void) {
                 } else {
                     VMLog(@"配置解析：所有候选路径都读不到配置");
                 }
+            }
+
+            // ②′ 混音策略层：与音量配置完全解耦，无条件安装。
+            //     必须无条件 —— 只要有一个参与播放的 App 不是混音的，
+            //     它一激活就会把别人掐掉，表现为「有时能同时播、有时不能」。
+            if (!skip) {
+                VMMixLoadConfig(bid);
+                VMMixInstallHooks();
             }
 
             // ③ 决定是否安装挂钩
@@ -1139,7 +1583,7 @@ static void VMStartEngine(void) {
                 VMStartEngine();
             } else {
                 gInstalled = 0;
-                VMLog(@"不安装任何挂钩（原因：%@），保持系统原样", reason);
+                VMLog(@"不安装音量挂钩（原因：%@），混音层=%d", reason, gMixHooked);
             }
         } @catch (NSException *e) {
             gVolume = 1.0f;
