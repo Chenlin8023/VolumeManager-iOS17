@@ -1,6 +1,8 @@
 /*
- * VolManAudioQueue v0.5.0 —— VolumeManager「每 App 音量」模块重写版
+ * VolManAudioQueue v1.1.1 —— VolumeManager「每 App 音量」模块重写版
  * ============================================================================
+ * v1.1.1  1) 音量值兼容字符串存储（设备上实测出现过 volume = "0.1951..."）；
+ *         2) 日志版本串改为 v1.1.1，避免与历史日志混淆。
  * 变更历史
  *   v0.1.0  首次重写。arm64e 切片为旧 ABI → 注入 SpringBoard 直接安全模式。
  *   v0.2.0  改 arm64 单切片，不再崩。但①过滤器误用 Classes → 没被注入任何 App
@@ -170,10 +172,31 @@ static BOOL VMWriteSink(NSString *path, NSString *dir, NSData *data) {
             [fm setAttributes:@{NSFilePosixPermissions:@(0644)} ofItemAtPath:path error:NULL];
             return YES;
         }
-        // 超过 256KB 自动截断，避免无限增长
+        // 超过 256KB 时保留尾部 128KB。
+        // 注意：不能写成「只写当前这一条」——那等于整份清空，取日志时只剩一行，
+        // 极容易被误判成「日志坏了」。诊断日志的价值全在最近发生了什么，
+        // 所以丢头部、留尾部，并明确写一行截断标记。
         NSDictionary *attr = [fm attributesOfItemAtPath:path error:NULL];
         if (attr && [[attr objectForKey:NSFileSize] unsignedIntegerValue] > 256 * 1024) {
-            return [data writeToFile:path atomically:YES];
+            NSData *old = [NSData dataWithContentsOfFile:path];
+            if (!old) return NO;
+            const NSUInteger keep = 128 * 1024;
+            NSUInteger from = old.length > keep ? old.length - keep : 0;
+            if (from > 0) {
+                // 对齐到行首，丢掉可能被切半的第一行
+                const char *p = (const char *)old.bytes;
+                while (from < old.length && p[from] != '\n') from++;
+                if (from < old.length) from++;
+            }
+            NSMutableData *merged = [NSMutableData data];
+            NSData *mark = [@"=== 日志超过 256KB，已丢弃较早内容，以下为最近 128KB ===\n"
+                            dataUsingEncoding:NSUTF8StringEncoding];
+            if (mark) [merged appendData:mark];
+            if (from < old.length) {
+                [merged appendData:[old subdataWithRange:NSMakeRange(from, old.length - from)]];
+            }
+            [merged appendData:data];
+            return [merged writeToFile:path atomically:YES];
         }
         NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!fh) return NO;
@@ -368,15 +391,25 @@ static void VMScanNode(id node, NSString *bid, int depth, VMCand *best, NSString
                 id num = v;
                 if ([num isKindOfClass:[NSDictionary class]]) {
                     NSDictionary *vd = (NSDictionary *)num;
-                    if ([vd[@"volume"] isKindOfClass:[NSNumber class]]) {
-                        num = vd[@"volume"];
+                    // 音量值可能是 NSNumber，也可能被写成字符串（设备上实测有
+                    // volume = "0.1951640232857027" 这种），两种都要认。
+                    id vv = vd[@"volume"];
+                    if ([vv isKindOfClass:[NSNumber class]] || [vv isKindOfClass:[NSString class]]) {
+                        num = vv;
                     } else {
+                        // 回退扫描必须限定键名，否则会误取 appName（也是字符串）
                         for (id kk in vd) {
-                            if ([vd[kk] isKindOfClass:[NSNumber class]]) { num = vd[kk]; break; }
+                            if (![kk isKindOfClass:[NSString class]]) continue;
+                            NSString *kl = [(NSString *)kk lowercaseString];
+                            if ([kl rangeOfString:@"vol"].location == NSNotFound &&
+                                [kl rangeOfString:@"level"].location == NSNotFound) continue;
+                            id cand = vd[kk];
+                            if ([cand isKindOfClass:[NSNumber class]] ||
+                                [cand isKindOfClass:[NSString class]]) { num = cand; break; }
                         }
                     }
                 }
-                if ([num isKindOfClass:[NSNumber class]]) {
+                if ([num isKindOfClass:[NSNumber class]] || [num isKindOfClass:[NSString class]]) {
                     if (ks1 > best->score) {
                         best->score = ks1;
                         best->value = [num floatValue];
@@ -397,13 +430,15 @@ static void VMScanNode(id node, NSString *bid, int depth, VMCand *best, NSString
 static float VMDefaultKeyValue(NSDictionary *root) {
     for (NSString *k in @[@"-", @"default", @"defaultVolume", @"volume"]) {
         id v = root[k];
-        if ([v isKindOfClass:[NSNumber class]]) return [v floatValue];
+        if ([v isKindOfClass:[NSNumber class]] || [v isKindOfClass:[NSString class]])
+            return [v floatValue];
     }
     id sub = root[@"allAppVolume"];
     if ([sub isKindOfClass:[NSDictionary class]]) {
         for (NSString *k in @[@"-", @"default"]) {
             id v = ((NSDictionary *)sub)[k];
-            if ([v isKindOfClass:[NSNumber class]]) return [v floatValue];
+            if ([v isKindOfClass:[NSNumber class]] || [v isKindOfClass:[NSString class]])
+                return [v floatValue];
         }
     }
     return -1.0f;
@@ -1048,7 +1083,7 @@ static void VMStartEngine(void) {
 
             float forced = VMReadForceFile();
 
-            VMLog(@"=== v0.5.0 注入 | bundle=%@ 总开关=%d 跳过=%d 调试旁路=%.3f",
+            VMLog(@"=== v1.1.1 注入 | bundle=%@ 总开关=%d 跳过=%d 调试旁路=%.3f",
                   bid, enabled, skip, (double)forced);
 
             // ① 全量路径探测（一次性，把真相写进日志）

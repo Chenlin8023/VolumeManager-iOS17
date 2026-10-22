@@ -1,0 +1,9 @@
+Package: com.local.volmanprefsclean
+Name: VolManPrefsClean
+Version: 1.0.3
+Architecture: iphoneos-arm64
+Description: VolumeManager 设置面板净化模块。移除原作者遗留的支付宝打赏、GitHub 关注、Sileo 源、反盗版声明以及面板末尾针对他人的长篇攻击文字，功能性开关全部保留。本版为诊断版，注入范围与音频模块一致，用于定位此前完全不产生日志的原因。1.0.3 修正文件权限，此前打包时误设为 644 缺少执行位，模块未被加载，这就是完全没有日志的真正原因。arm64 单切片。
+Maintainer: local
+Author: local
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 15.0)
