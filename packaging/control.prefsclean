@@ -1,9 +1,12 @@
 Package: com.local.volmanprefsclean
-Name: VolManPrefsClean
+Name: VolumeManager 面板净化（单独补丁）
 Version: 1.1.0
 Architecture: iphoneos-arm64
-Description: VolumeManager 设置面板净化模块。移除原作者遗留的支付宝打赏收款链接、GitHub 关注与查看源码链接、Sileo 源、反盗版声明，以及面板末尾针对其他插件作者的长篇攻击文字，功能性开关全部保留。1.1.0 改为双保险：打包时先把原版面板二进制里的推广文案与链接按等长原则静态清空并重新签名，运行时再在 -setSpecifiers: / -specifiers 两处把整条条目摘掉，同时拦截残留按钮与 alipay/github/sileo 链接；顺带把「启用混响(isEnabled mixable)」的调试后缀改为「启用混音」。日志落在 /tmp/vm-prefsclean.log。arm64 单切片。
-Maintainer: local
-Author: local
 Section: Tweaks
+Priority: optional
+Maintainer: Chenlin8023
+Author: Chenlin8023
 Depends: mobilesubstrate, firmware (>= 15.0)
+Description: VolumeManager 设置面板净化补丁，仅供已安装原版 VolumeManager 的设备使用。
+ 安装 VolumeManager (Full) 的用户已内置该功能，无需再装本包。
+ 移除面板中作者的打赏、推广、反盗版与攻击性文字，功能开关全部保留。
