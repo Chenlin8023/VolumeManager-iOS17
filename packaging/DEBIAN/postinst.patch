@@ -68,6 +68,15 @@ for c in "$DIR_JB/volumeInfo.plist" \
 done
 
 if [ -n "$SRC" ]; then
+    # v1.3.0：把找到的配置回填到 jbroot 真实数据目录 —— 沙盒 App 只能读这里。
+    if [ "$SRC" != "$DIR_JB/volumeInfo.plist" ]; then
+        if cp -f "$SRC" "$DIR_JB/volumeInfo.plist" 2>/dev/null; then
+            chmod 666 "$DIR_JB/volumeInfo.plist" 2>/dev/null
+            echo "VolManAudioQueue: 已回填 jbroot 数据目录 → $DIR_JB/volumeInfo.plist"
+        else
+            echo "VolManAudioQueue: 警告 — 无法回填 $DIR_JB/volumeInfo.plist"
+        fi
+    fi
     cp -f "$SRC" "$SYNCED" 2>/dev/null
     chown mobile:mobile "$SYNCED" 2>/dev/null
     chmod 644 "$SYNCED" 2>/dev/null

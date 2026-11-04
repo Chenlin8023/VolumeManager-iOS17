@@ -7,6 +7,6 @@ Priority: optional
 Maintainer: Chenlin8023
 Author: Chenlin8023
 Depends: mobilesubstrate, firmware (>= 15.0)
-Description: VolumeManager 设置面板净化补丁，仅供已安装原版 VolumeManager 的设备使用。
- 安装 VolumeManager (Full) 的用户已内置该功能，无需再装本包。
- 移除面板中作者的打赏、推广、反盗版与攻击性文字，功能开关全部保留。
+Description: VolumeManager 设置面板净化补丁。
+ 移除面板中的打赏、推广与攻击性文字，功能开关全部保留。
+ 已装 VolumeManager (Full) 的用户无需安装。

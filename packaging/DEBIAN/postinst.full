@@ -52,6 +52,18 @@ for c in "$DIR_JB/volumeInfo.plist" \
 done
 
 if [ -n "$SRC" ]; then
+    # v1.3.0：把找到的配置回填到 jbroot 真实数据目录 —— 沙盒 App 只能读这里。
+    # 只同步到 Preferences 副本的话，滞留在裸路径等其他位置的配置对音频 App
+    # 完全不可见（2026-11-04 排障实录：配置滞留裸路径 → 全部音频 App
+    # 「配置缺失」不装挂钩 → 中央日志也不再生成）。
+    if [ "$SRC" != "$DIR_JB/volumeInfo.plist" ]; then
+        if cp -f "$SRC" "$DIR_JB/volumeInfo.plist" 2>/dev/null; then
+            chmod 666 "$DIR_JB/volumeInfo.plist" 2>/dev/null
+            echo "  已回填 jbroot 数据目录 → $DIR_JB/volumeInfo.plist"
+        else
+            echo "  警告 — 无法回填 $DIR_JB/volumeInfo.plist（沙盒 App 将读不到配置）"
+        fi
+    fi
     cp -f "$SRC" "$SYNCED" 2>/dev/null
     chown mobile:mobile "$SYNCED" 2>/dev/null
     chmod 644 "$SYNCED" 2>/dev/null

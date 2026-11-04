@@ -1,8 +1,12 @@
 Package: com.local.volmanaudioqueue
 Name: VolManAudioQueue
-Version: 1.2.0
+Version: 1.3.0
 Architecture: iphoneos-arm64
-Description: VolumeManager 每 App 音量模块重写版·补丁包。修复三处缺陷 —— 一是杂音，渲染回调改为按真实音频格式缩放，遇到不认识的格式一律不动数据；二是配置读不到，补上 Rootless 的 /var/jb 前缀并做多路径探测；三是改完音量要重开 App，补齐 HUD 通知监听加文件时间戳轮询兜底。arm64 单切片，不会进安全模式。1.1.0 新增设置面板净化模块 VolManPrefsClean：移除原作者遗留的支付宝打赏条目与收款链接、GitHub 关注与查看源码条目、Sileo 源条目、反盗版声明，以及面板末尾那段针对其他插件作者的长篇攻击文字，全部功能开关原样保留。1.1.3 修正净化模块的文件权限，此前该模块因缺少执行位从未被系统加载，因此既无日志也无效果。1.2.0 新增混音策略层：挂钩 AVAudioSession 的 setActive 与 setCategory 系列，在每次激活前把会话重新声明为可混音（MixWithOthers），让多个 App 稳定同时播放；该层与音量配置解耦、无条件安装，保留 App 的 mode 与路由选项，录音类不改类别，私有 API 探测后才挂。默认开启，可用 vmMixEnabled / vmMixGuard / vmMixExcludedApps 或 vmaq-mix-off 关闭。
+Description: VolumeManager 每 App 音量引擎（补丁包，需已装原版面板）。
+ 功能：每个 App 单独调音量（最低静音）；多 App 同时播放；改完立即生效。
+ 修复：静音或低音量在长时间播放后失效（恢复原音量）。
+ 仅含音量引擎与混音层，不含面板与 HUD。
+ 提示：App 若用 JailFools 等工具注入过，升级后需重新注入引擎。
 Maintainer: local
 Author: local
 Section: Tweaks

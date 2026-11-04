@@ -6,7 +6,22 @@
 > 已在 **iPhone 15 Pro / iOS 17.2.1 / Rootless 越狱** 实测通过：
 > 不进安全模式、无杂音、多 App 同时播放正常、每个 App 的音量单独生效且即时刷新。
 
-**当前版本：v1.2.0**（音量引擎 1.2.0 + 设置面板净化模块 1.1.0）
+**当前版本：v1.3.0**
+
+## 本版修复
+
+- **静音/低音量长时间播放后失效**（自动恢复原音量）：渲染层槽位只增不减，耗尽后新音频单元
+  不再缩放。容量 32→512，按听书 App 实测速率可撑约 20 小时活跃播放。
+- 日志精简：明细收进 `vmaq-debug` 开关；每 32 次包装输出一行 `ctx 占用 x/512`。
+
+## 升级后必做
+
+1. 用 **JailFools** 等工具注入过的 App，引擎副本在 `App.app/Frameworks/VolManAudioQueue.dylib`，
+   装新版不会自动更新（动态注入的 App 会自动跟随）；
+2. 把 `/var/jb/Library/MobileSubstrate/DynamicLibraries/VolManAudioQueue.dylib`
+   覆盖到上述位置，`.jailfools` 文件不要动；
+3. 杀掉 App 重开，日志出现 `=== v1.3.0 注入` 即成功。覆盖后引擎不加载时，先检查该文件权限为 755。
+4. App Store 更新过这些 App 后，同样执行 2–3 步。
 
 v1.2.0 变更：
 
@@ -214,6 +229,12 @@ THEOS_PACKAGE_SCHEME = rootless   # 根前缀 /var/jb
 * 净化分两层：静态层按**原文案**定位，原作者若改版会导致构建期直接报错中止
   （不会产出半成品包）；运行层按**关键词**兜底，但改版后仍可能漏掉新文案。
 * 混音层只在**会话激活时**改写策略，因此改造前就已经在放音的 App 需要重启才会走新逻辑。
+* **AudioQueue 直连的 App（如 B站）不支持播放中实时调节**：备用层只在 App 调用
+  `AudioQueueSetParameter` 的那一刻缩放，不登记、不回写；表现为拖滑块无效、
+  重新播放后生效。AVPlayer / AVAudioPlayer / AVSampleBufferAudioRenderer 三路实时正常。
+* **沙盒 App 可能读不到 jbroot 下的配置**（B站实测 8 个候选全 miss）：此时混音层照常
+  工作（能同播）但不安装音量挂钩（调节无效）。应急 = 把 `volumeInfo.plist` 复制到该 App
+  数据容器的 `Documents/`；面板改音量后需重新复制。放 `vmaq-debug` 文件可看各候选的 errno。
 
 ---
 

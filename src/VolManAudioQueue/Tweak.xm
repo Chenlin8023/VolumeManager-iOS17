@@ -1,6 +1,18 @@
 /*
- * VolManAudioQueue v1.2.0 —— VolumeManager「每 App 音量」模块重写版
+ * VolManAudioQueue v1.3.0 —— VolumeManager「每 App 音量」模块重写版
  * ============================================================================
+ * v1.3.0  大回退版：以 v1.2.0 源码为基线，只保留与两个主诉直接相关的差异——
+ *         ① 渲染回调层 ctx 表容量 32→512（唯一逻辑改动；修「几小时后某 App
+ *            静音失效、杀后台才恢复」＝表只增不减耗尽 32 槽后新单元包装静默
+ *            失败。静态数组按进程生命周期兜底，同 (unit,scope,element) 重注册
+ *            走 match 复用；不需要任何销毁钩子/存活探测——1.2.1~1.2.4 那套
+ *            机制整体废弃，实测无必要且引入风险）。
+ *         ② 日志瘦身（纯日志，无逻辑影响；修「几小时把 256KB 日志轮转没」）：
+ *            Widget/Today 扩展进程（PluginKitPlugin 容器）跳过、探针明细与
+ *            配置原文仅 vmaq-debug 文件存在时输出、包装日志配额 60→200。
+ *         ③ 包装计数每 32 次输出一行 ctx 占用率（验证用，无逻辑影响）。
+ *         其余 1.2.1~1.2.7 的全部改动（Dispose 钩子/死亡单元探测/jbroot 反解/
+ *         AQ 登记表/配置读失败保持系数等）不进本版；复盘见仓库 docs 与案卷。
  * v1.2.0  新增「混音策略层」：挂钩 AVAudioSession 的 setActive / setCategory 系列，
  *         在每次激活前把会话重新声明成 MixWithOthers，让多个 App 真正同时播放。
  *         该层与音量配置解耦、无条件安装；私有 API 探测后才挂；默认开启，
@@ -162,6 +174,22 @@ static NSString *VMCurrentBundleId(void) {
         return b ?: @"";
     } @catch (NSException *e) {
         return @"";
+    }
+}
+
+// v1.3.0：详尽日志开关 —— 任一配置目录放名为 vmaq-debug 的空文件即开。
+// 平时关：探针明细/配置原文/目录列举这些一次性诊断占掉了 256KB 日志的
+// 绝大部分（每次注入 ~90 行 × 任意 App 启动），几小时就把历史轮转没了。
+static int gVMAQDebug = 0;
+static int VMAQDebugProbe(void) {
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        for (NSString *d in VMDirs()) {
+            if ([fm fileExistsAtPath:[d stringByAppendingPathComponent:@"vmaq-debug"]]) return 1;
+        }
+        return 0;
+    } @catch (NSException *e) {
+        return 0;
     }
 }
 
@@ -327,45 +355,58 @@ static void VMProbePaths(void) {
     @try {
         VMLog(@"进程 uid=%d home=%@", getuid(), NSHomeDirectory());
 
-        int idx = 0;
+        // v1.3.0：明细（每个候选的 dev/ino、目录列举）只在 vmaq-debug 时输出；
+        // 平时一行汇总 —— 10 个探针 + 4 个目录 ≈ 14 行/次注入，× 任意 App 启动，
+        // 是日志轮转过快的主要原因。
+        int idx = 0, hits = 0, total = 0;
+        NSString *firstHit = nil;
         for (NSString *p in VMConfigCandidates()) {
             NSString *tag = [NSString stringWithFormat:@"[%d]", idx++];
+            total++;
             struct stat st;
             memset(&st, 0, sizeof(st));
             // 注意：打印用 p 本体，stat 用临时副本（见文件头注释）
             int r = VMStat(p, &st);
             if (r == 0) {
-                VMLog(@"探针%@ 命中 %@ size=%lld mode=%o dev=%llu ino=%llu",
-                      tag, p, (long long)st.st_size, (unsigned)(st.st_mode & 07777),
-                      (unsigned long long)st.st_dev, (unsigned long long)st.st_ino);
-            } else {
+                hits++;
+                if (!firstHit) firstHit = p;
+                if (gVMAQDebug)
+                    VMLog(@"探针%@ 命中 %@ size=%lld mode=%o dev=%llu ino=%llu",
+                          tag, p, (long long)st.st_size, (unsigned)(st.st_mode & 07777),
+                          (unsigned long long)st.st_dev, (unsigned long long)st.st_ino);
+            } else if (gVMAQDebug) {
                 VMLog(@"探针%@ 缺失 %@ errno=%d(%s)", tag, p, errno, strerror(errno));
             }
         }
+        if (!gVMAQDebug)
+            VMLog(@"配置探测：%d 个候选命中 %d 个（首个=%@；调试放 vmaq-debug 文件看明细）",
+                  total, hits, firstHit ?: @"无");
 
-        // 目录列举：只看和本插件相关的条目，避免刷屏
-        NSArray *dirs = @[ VM_DIR_JB, VM_DIR_PLAIN, VM_DIR_JBROOT, @"/var/mobile/Library/Preferences" ];
-        for (NSString *d in dirs) {
-            NSError *e = nil;
-            NSArray *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:d error:&e];
-            if (!items) {
-                VMLog(@"目录 %@ 无法列举: %@", d, e.localizedDescription ?: @"(未知)");
-                continue;
-            }
-            NSMutableArray *hit = [NSMutableArray array];
-            for (NSString *it in items) {
-                NSString *low = it.lowercaseString;
-                if ([low containsString:@"volume"] || [low containsString:@"sunshine"] ||
-                    [low containsString:@"volman"]  || [low containsString:@"vmaq"]) {
-                    NSString *full = [d stringByAppendingPathComponent:it];
-                    struct stat st; memset(&st, 0, sizeof(st));
-                    long long sz = (VMStat(full, &st) == 0) ? (long long)st.st_size : -1;
-                    [hit addObject:[NSString stringWithFormat:@"%@(%lldB)", it, sz]];
+        if (gVMAQDebug) {
+            // 目录列举：只看和本插件相关的条目，避免刷屏（仅 debug）
+            NSArray *dirs = @[ VM_DIR_JB, VM_DIR_PLAIN, VM_DIR_JBROOT, @"/var/mobile/Library/Preferences" ];
+            for (NSString *d in dirs) {
+                NSError *e = nil;
+                NSArray *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:d error:&e];
+                if (!items) {
+                    VMLog(@"目录 %@ 无法列举: %@", d, e.localizedDescription ?: @"(未知)");
+                    continue;
                 }
+                NSMutableArray *hit = [NSMutableArray array];
+                for (NSString *it in items) {
+                    NSString *low = it.lowercaseString;
+                    if ([low containsString:@"volume"] || [low containsString:@"sunshine"] ||
+                        [low containsString:@"volman"]  || [low containsString:@"vmaq"]) {
+                        NSString *full = [d stringByAppendingPathComponent:it];
+                        struct stat st; memset(&st, 0, sizeof(st));
+                        long long sz = (VMStat(full, &st) == 0) ? (long long)st.st_size : -1;
+                        [hit addObject:[NSString stringWithFormat:@"%@(%lldB)", it, sz]];
+                    }
+                }
+                VMLog(@"目录 %@ 共 %lu 项，相关项: %@",
+                      d, (unsigned long)items.count,
+                      hit.count ? [hit componentsJoinedByString:@", "] : @"(无)");
             }
-            VMLog(@"目录 %@ 共 %lu 项，相关项: %@",
-                  d, (unsigned long)items.count,
-                  hit.count ? [hit componentsJoinedByString:@", "] : @"(无)");
         }
     } @catch (NSException *e) {
         VMLog(@"探针异常: %@", e);
@@ -610,7 +651,10 @@ static void VMReapply(float f, BOOL revertToBase) {
 // ===========================================================================
 // 渲染回调层：格式感知的逐样本缩放
 // ===========================================================================
-#define VM_CTX_MAX    32
+// v1.3.0：32→512。静态数组（不做动态扩容——渲染回调持有槽位指针，realloc 会让
+// 已安装回调的 refCon 全部失效）。512×~96B ≈ 48KB BSS，按进程生命周期兜底；
+// 同 (unit,scope,element) 重注册走 match 复用，槽位不主动回收（无销毁钩子）。
+#define VM_CTX_MAX    512
 #define VM_CTX_MAGIC  0x564D415143545831ULL   // "VMAQCTX1"
 #define VM_ASBD_TRIES 16
 
@@ -629,6 +673,8 @@ typedef struct {
 
 static VMCtx gCtx[VM_CTX_MAX];
 static pthread_mutex_t gCtxLock = PTHREAD_MUTEX_INITIALIZER;
+static volatile int gCtxPeak   = 0;   // v1.3.0：占用峰值（诊断）
+static volatile int gWrapCount = 0;   // v1.3.0：累计包装次数（占用率日志节流）
 
 // 按 (unit, scope, element) 找到或新建上下文。只在非实时路径调用。
 static VMCtx *VMObtainCtx(AudioUnit unit, UInt32 scope, UInt32 element) {
@@ -1232,7 +1278,7 @@ static void VMMixInstallHooks(void) {
     c->asbdTries   = 0;
     BOOL gotASBD   = VMQueryASBD(c);          // 先试一次，成功就不必在实时线程里查
 
-    if (gHookLogCap < 60) {
+    if (gHookLogCap < 200) {
         gHookLogCap++;
         VMLog(@"包装渲染回调 unit=%p scope=%u elem=%u 原回调=%p 格式=%@",
               inUnit, (unsigned)inScope, (unsigned)inElement, orig.inputProc,
@@ -1248,6 +1294,20 @@ static void VMMixInstallHooks(void) {
     nl.inputProcRefCon = c;
     UInt32 nlSize = (UInt32)sizeof(AURenderCallbackStruct);
     OSStatus r = %orig(inUnit, inID, inScope, inElement, &nl, nlSize);
+
+    // v1.3.0：占用率自证日志 —— 每 32 次包装一行，不受 vmaq-debug 门控。
+    // 512 槽下唯一需要盯的指标就是它：平稳低位=健康，持续爬升逼近上限=异常。
+    {
+        int wc = __sync_add_and_fetch(&gWrapCount, 1);
+        if ((wc & 31) == 1) {
+            int used = 0;
+            pthread_mutex_lock(&gCtxLock);
+            for (int i = 0; i < VM_CTX_MAX; i++) if (gCtx[i].used) used++;
+            pthread_mutex_unlock(&gCtxLock);
+            if (used > gCtxPeak) gCtxPeak = used;
+            VMLog(@"ctx 占用 %d/%d（峰值 %d，累计包装 %d）", used, VM_CTX_MAX, gCtxPeak, wc);
+        }
+    }
 
     // 布防成功（回调装上且拿到了流格式）→ 渲染回调层接管。
     // 立刻把备用层已写入的 base×系数 回退成 base，避免 factor²。
@@ -1515,12 +1575,16 @@ static void VMStartEngine(void) {
             NSString *bid  = VMCurrentBundleId();
             BOOL enabled   = VMPrefsEnabled();
             BOOL isSB      = [bid isEqualToString:@"com.apple.springboard"];
-            BOOL skip      = (bid.length == 0) || isSB;
+            // v1.3.0：Widget/Today 等扩展进程（PluginKitPlugin 容器）不可能出声，
+            // 挂钩 + 0.5s 轮询 + 探针日志对它们纯属浪费 —— 与 SpringBoard 同级跳过。
+            BOOL isExt     = [NSHomeDirectory() rangeOfString:@"PluginKitPlugin"].location != NSNotFound;
+            BOOL skip      = (bid.length == 0) || isSB || isExt;
+            gVMAQDebug     = VMAQDebugProbe();
 
             float forced = VMReadForceFile();
 
-            VMLog(@"=== v1.2.0 注入 | bundle=%@ 总开关=%d 跳过=%d 调试旁路=%.3f",
-                  bid, enabled, skip, (double)forced);
+            VMLog(@"=== v1.3.0 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f",
+                  bid, enabled, skip, isExt, gVMAQDebug, (double)forced);
 
             // ① 全量路径探测（一次性，把真相写进日志）
             if (!skip) VMProbePaths();
@@ -1538,7 +1602,7 @@ static void VMStartEngine(void) {
                     if (cfgFactor > 1.0f) cfgFactor = 1.0f;
                     VMLog(@"配置解析：文件=%@ 匹配键=%@ 原值=%.6f → 归一化=%.4f 命中=%d",
                           cfgPath, cfgKey ?: @"(无)", (double)cfgRaw, (double)cfgFactor, cfgMatched);
-                    if (!cfgMatched) VMDumpConfigOnce(cfgRoot);
+                    if (!cfgMatched && gVMAQDebug) VMDumpConfigOnce(cfgRoot);
                 } else {
                     VMLog(@"配置解析：所有候选路径都读不到配置");
                 }
@@ -1559,7 +1623,9 @@ static void VMStartEngine(void) {
             NSString *reason = @"";
             if (skip || !enabled) {
                 gVolume = 1.0f;
-                reason = skip ? (isSB ? @"关键进程 SpringBoard" : @"无 bundle id")
+                reason = skip ? (isSB    ? @"关键进程 SpringBoard"
+                                 : isExt ? @"扩展进程(Widget/PluginKitPlugin)不出声"
+                                         : @"无 bundle id")
                               : @"总开关关闭";
             } else if (forced >= 0.0f && forced <= 1.0f) {
                 gVolume = forced;

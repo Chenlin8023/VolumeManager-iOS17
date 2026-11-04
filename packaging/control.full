@@ -1,6 +1,6 @@
 Package: com.local.volmanaudioqueue.full
 Name: VolumeManager (Full)
-Version: 1.2.0
+Version: 1.3.0
 Architecture: iphoneos-arm64
 Section: Tweaks
 Priority: optional
@@ -9,7 +9,8 @@ Author: Chenlin8023
 Depends: mobilesubstrate, firmware (>= 15.0), dev.theos.orion (>= 1.0.0)
 Conflicts: byg.iosios.net.volume-manager, com.local.volmanaudioqueue
 Replaces: byg.iosios.net.volume-manager, com.local.volmanaudioqueue
-Description: 每个 App 独立音量，重写音量引擎消除爆音，改完即时生效。
- 修复 16 位 PCM 被按 4 字节硬读导致的杂音；补齐三重刷新；
- 1.2.0 新增混音策略层，多 App 可稳定同时播放。
- 全量包，一个包装完全套并已净化设置面板，无需再装单独补丁。
+Description: 每个 App 独立音量，多个 App 可同时播放。
+ 功能：每个 App 单独调音量（最低静音）；多 App 同时播放，互不打断；改完立即生效。
+ 修复：静音或低音量在长时间播放后失效（恢复原音量）。
+ 全量包：含设置面板、音量 HUD 与音量引擎，面板推广文案已清理。
+ 提示：App 若用 JailFools 等工具注入过，升级后需重新注入引擎。
