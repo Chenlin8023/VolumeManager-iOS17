@@ -1,12 +1,16 @@
 /*
- * VolManAudioQueue v1.3.3 —— VolumeManager「每 App 音量」模块重写版
+ * VolManAudioQueue v1.3.4 —— VolumeManager「每 App 音量」模块重写版
  * ============================================================================
+ * v1.3.4  转正版：RC探针节流——v1.3.3 的 5s 无条件输出改为 30s 且
+ *         计数有变化才输出（无条件 5s 在听书场景 ≈720 行/h，会把
+ *         256KB 日志轮转压满；探针本身在 T1/T2 A/B 中已证明价值，
+ *         保留为「失效」类问题的常备裁决工具）。纯日志改动。
  * v1.3.3  诊断版（纯日志探针，零逻辑改动；修「日志说已布防、听感却无效」
  *         无法归因的问题——腾讯阅读/起点读书中央注入形态下听感失效而
  *         日志全绿，日志与听感脱节，必须先把听感变成可测数据）：
  *         ① 每条日志加 pid —— 解开「两条注入头」之谜（同 pid=同进程
  *            双实例；不同 pid=两进程），并区分多引擎写入的日志行
- *         ② RC探针：渲染回调真实执行统计（原子计数+5s 输出）——
+ *         ② RC探针：渲染回调真实执行统计（原子计数+定时输出）——
  *            「缩放+0」=包装的 unit 未在发声路径被调用；「缩放持续+X」
  *            而听感不变=包装了非发声单元。根因分流全靠它
  *         ③ 包装行加采样率（%.0fHz）——辅助辨认 unit 类型（TTS/音乐）
@@ -1552,24 +1556,26 @@ static void VMRefresh(NSString *reason) {
     @try {
         if (!gInstalled) return;
 
-        // v1.3.3 探针：每 10 个轮询 tick（≈5s）输出一次渲染回调真实执行统计。
+        // v1.3.4 探针：每 60 个轮询 tick（≈30s）且计数有变化才输出。
         // 「缩放+0」而系数<1.0 = 包装的 unit 没有在发声路径上被调用 →
         // 听感失效的直接证据；「缩放+X 持续增长」而听感不变 = 包装了
         // 非发声单元。把听感争议变成日志可判事实。
         {
             static int rcTicks = 0;
             static int64_t rcLastCalls = 0, rcLastScaled = 0;
-            if (++rcTicks >= 10) {
+            if (++rcTicks >= 60) {
                 rcTicks = 0;
                 int64_t calls  = gRCCalls;
                 int64_t scaled = gRCScaled;
-                VMLog(@"RC探针 5s：调用+%lld 缩放+%lld（累计 调用%lld 缩放%lld，系数 %.4f，布防 %d）",
-                      (long long)(calls - rcLastCalls),
-                      (long long)(scaled - rcLastScaled),
-                      (long long)calls, (long long)scaled,
-                      (double)gVolume, gRCArmed);
-                rcLastCalls = calls;
-                rcLastScaled = scaled;
+                if (calls != rcLastCalls || scaled != rcLastScaled) {
+                    VMLog(@"RC探针 30s：调用+%lld 缩放+%lld（累计 调用%lld 缩放%lld，系数 %.4f，布防 %d）",
+                          (long long)(calls - rcLastCalls),
+                          (long long)(scaled - rcLastScaled),
+                          (long long)calls, (long long)scaled,
+                          (double)gVolume, gRCArmed);
+                    rcLastCalls = calls;
+                    rcLastScaled = scaled;
+                }
             }
         }
 
@@ -1690,7 +1696,7 @@ static void VMStartEngine(void) {
 
             float forced = VMReadForceFile();
 
-            VMLog(@"=== v1.3.3 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f",
+            VMLog(@"=== v1.3.4 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f",
                   bid, enabled, skip, isExt, gVMAQDebug, (double)forced);
 
             // ① 全量路径探测（一次性，把真相写进日志）
