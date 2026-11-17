@@ -1,6 +1,15 @@
 /*
- * VolManAudioQueue v1.3.1 —— VolumeManager「每 App 音量」模块重写版
+ * VolManAudioQueue v1.3.3 —— VolumeManager「每 App 音量」模块重写版
  * ============================================================================
+ * v1.3.3  诊断版（纯日志探针，零逻辑改动；修「日志说已布防、听感却无效」
+ *         无法归因的问题——腾讯阅读/起点读书中央注入形态下听感失效而
+ *         日志全绿，日志与听感脱节，必须先把听感变成可测数据）：
+ *         ① 每条日志加 pid —— 解开「两条注入头」之谜（同 pid=同进程
+ *            双实例；不同 pid=两进程），并区分多引擎写入的日志行
+ *         ② RC探针：渲染回调真实执行统计（原子计数+5s 输出）——
+ *            「缩放+0」=包装的 unit 未在发声路径被调用；「缩放持续+X」
+ *            而听感不变=包装了非发声单元。根因分流全靠它
+ *         ③ 包装行加采样率（%.0fHz）——辅助辨认 unit 类型（TTS/音乐）
  * v1.3.1  修「快速调音时音量指数衰减到 0」（备用层基准污染；单变量修复）：
  *         App 常在 setActive/快速调音后把它读到的当前音量（= 我们缩放后的输出）
  *         原样 set 回来，备用层三个 setVolume 钩子把它照单登记为新基准，
@@ -91,6 +100,7 @@
 #import <errno.h>
 #import <math.h>
 #import <sys/stat.h>
+#import <unistd.h>
 #if __has_include(<AudioUnit/AudioUnit.h>)
 #import <AudioUnit/AudioUnit.h>
 #endif
@@ -167,6 +177,11 @@ static int VMStat(NSString *p, struct stat *st) {
 static volatile float gVolume     = 1.0f;   // 本进程音量系数，1.0 = 不改动
 static volatile int   gRCActive   = 0;      // 渲染回调层「已经真正缩放过一次」
 static volatile int   gRCArmed    = 0;      // 渲染回调层「已布防」（包装成功且拿到流格式）
+// v1.3.3 探针（纯日志）：渲染回调真实执行统计。实时线程内只做原子加，
+// 读数与输出在 0.5s 轮询线程（非实时）。目的：把「缩放有没有真的跑在
+// 发声路径上」从听感问题变成日志可判事实。
+static volatile int64_t gRCCalls  = 0;      // 渲染回调被调用总次数（包装后的 unit 被拉起）
+static volatile int64_t gRCScaled = 0;      // 其中真正执行了缩放的次数（系数 <1.0 且格式可用）
 static volatile int   gInstalled  = 0;      // 挂钩是否已安装
 static volatile int   gHookLogCap = 0;      // 非实时路径日志配额
 static volatile int   gReapply    = 0;      // 正在回写音量 → 挂钩直接放行（防自噬）
@@ -277,8 +292,8 @@ static void VMLogRaw(NSString *line) {
             NSString *__b = [[NSBundle mainBundle] bundleIdentifier] ?: @"-";   \
             NSDateFormatter *__df = [[NSDateFormatter alloc] init];             \
             [__df setDateFormat:@"MM-dd HH:mm:ss"];                             \
-            NSString *__l = [NSString stringWithFormat:@"[%@ %@] " fmt "\n",    \
-                             [__df stringFromDate:[NSDate date]], __b,          \
+            NSString *__l = [NSString stringWithFormat:@"[%@ pid=%d %@] " fmt "\n", \
+                             [__df stringFromDate:[NSDate date]], getpid(), __b,\
                              ##__VA_ARGS__];                                    \
             NSLog(@"[VMAQ] %@", __l);                                           \
             VMLogRaw(__l);                                                      \
@@ -835,6 +850,8 @@ static OSStatus VMRenderCB(void *inRefCon,
     VMCtx *c = (VMCtx *)inRefCon;
     if (!c || c->magic != VM_CTX_MAGIC) return noErr;
 
+    __sync_add_and_fetch(&gRCCalls, 1);              // v1.3.3 探针：原子加，非实时安全
+
     OSStatus st = noErr;
     if (c->origProc) {
         st = c->origProc(c->origRefCon, ioActionFlags, inTimeStamp,
@@ -855,6 +872,7 @@ static OSStatus VMRenderCB(void *inRefCon,
     }
 
     VMScaleBufferList(&c->asbd, ioData, v);
+    __sync_add_and_fetch(&gRCScaled, 1);             // v1.3.3 探针：真正缩放了一次
     gRCActive = 1;                                   // 告知其它图层：让位
     return st;
 }
@@ -1330,10 +1348,11 @@ static void VMMixInstallHooks(void) {
         gHookLogCap++;
         VMLog(@"包装渲染回调 unit=%p scope=%u elem=%u 原回调=%p 格式=%@",
               inUnit, (unsigned)inScope, (unsigned)inElement, orig.inputProc,
-              gotASBD ? [NSString stringWithFormat:@"float=%d bits=%u ch=%u",
+              gotASBD ? [NSString stringWithFormat:@"float=%d bits=%u ch=%u %.0fHz",
                               (c->asbd.mFormatFlags & kAudioFormatFlagIsFloat) ? 1 : 0,
                               (unsigned)c->asbd.mBitsPerChannel,
-                              (unsigned)c->asbd.mChannelsPerFrame]
+                              (unsigned)c->asbd.mChannelsPerFrame,
+                              (double)c->asbd.mSampleRate]
                       : @"(待实时线程补查)");
     }
 
@@ -1532,6 +1551,28 @@ static void VMRefresh(NSString *reason) {
     @autoreleasepool {
     @try {
         if (!gInstalled) return;
+
+        // v1.3.3 探针：每 10 个轮询 tick（≈5s）输出一次渲染回调真实执行统计。
+        // 「缩放+0」而系数<1.0 = 包装的 unit 没有在发声路径上被调用 →
+        // 听感失效的直接证据；「缩放+X 持续增长」而听感不变 = 包装了
+        // 非发声单元。把听感争议变成日志可判事实。
+        {
+            static int rcTicks = 0;
+            static int64_t rcLastCalls = 0, rcLastScaled = 0;
+            if (++rcTicks >= 10) {
+                rcTicks = 0;
+                int64_t calls  = gRCCalls;
+                int64_t scaled = gRCScaled;
+                VMLog(@"RC探针 5s：调用+%lld 缩放+%lld（累计 调用%lld 缩放%lld，系数 %.4f，布防 %d）",
+                      (long long)(calls - rcLastCalls),
+                      (long long)(scaled - rcLastScaled),
+                      (long long)calls, (long long)scaled,
+                      (double)gVolume, gRCArmed);
+                rcLastCalls = calls;
+                rcLastScaled = scaled;
+            }
+        }
+
         NSString *bid = VMCurrentBundleId();
         BOOL enabled  = VMPrefsEnabled();
 
@@ -1649,7 +1690,7 @@ static void VMStartEngine(void) {
 
             float forced = VMReadForceFile();
 
-            VMLog(@"=== v1.3.1 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f",
+            VMLog(@"=== v1.3.3 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f",
                   bid, enabled, skip, isExt, gVMAQDebug, (double)forced);
 
             // ① 全量路径探测（一次性，把真相写进日志）
