@@ -1,6 +1,16 @@
 /*
- * VolManAudioQueue v1.3.0 —— VolumeManager「每 App 音量」模块重写版
+ * VolManAudioQueue v1.3.1 —— VolumeManager「每 App 音量」模块重写版
  * ============================================================================
+ * v1.3.1  修「快速调音时音量指数衰减到 0」（备用层基准污染；单变量修复）：
+ *         App 常在 setActive/快速调音后把它读到的当前音量（= 我们缩放后的输出）
+ *         原样 set 回来，备用层三个 setVolume 钩子把它照单登记为新基准，
+ *         下一轮再乘系数 → factor^n 指数衰减（B站概念版 11-04 09:02 实锤
+ *         0.5112→0.2614→…→0.0000 两秒塌 0；基准被污染成 ~0 后，系数恢复 1.0
+ *         的回写仍写 0，静音持续到 App 重设音量为止）。
+ *         修法=每对象记录「我方最近写入值」（gLastWritten，弱键同 gBase），
+ *         传入值与之近似相等（差 <0.001）判为 echo：不登记基准、原样放行；
+ *         系数变化由 0.5s 轮询回写兜底。AudioQueueSetParameter 钩子无登记表、
+ *         不在此列（其登记/回写缺口是已知边界，另立项单独验证）。
  * v1.3.0  大回退版：以 v1.2.0 源码为基线，只保留与两个主诉直接相关的差异——
  *         ① 渲染回调层 ctx 表容量 32→512（唯一逻辑改动；修「几小时后某 App
  *            静音失效、杀后台才恢复」＝表只增不减耗尽 32 槽后新单元包装静默
@@ -580,8 +590,9 @@ static void VMDumpConfigOnce(NSDictionary *root) {
 //   记录「App 自己设定的基准音量」，这样系数变化时能把 base×新系数 写回去，
 //   实现实时生效。键持弱引用（对象释放自动移除）。
 // ===========================================================================
-static NSMapTable      *gBase     = nil;
-static pthread_mutex_t  gBaseLock = PTHREAD_MUTEX_INITIALIZER;
+static NSMapTable      *gBase        = nil;
+static NSMapTable      *gLastWritten = nil;   // v1.3.1：echo 检测（每对象最近一次我方写入值）
+static pthread_mutex_t  gBaseLock    = PTHREAD_MUTEX_INITIALIZER;
 
 static void VMBaseLockInit(void) {
     if (!gBase) {
@@ -590,6 +601,43 @@ static void VMBaseLockInit(void) {
                        valueOptions:NSPointerFunctionsStrongMemory
                            capacity:8];
     }
+    if (!gLastWritten) {
+        gLastWritten = [[NSMapTable alloc]
+                        initWithKeyOptions:(NSPointerFunctionsWeakMemory | NSPointerFunctionsOpaquePersonality)
+                              valueOptions:NSPointerFunctionsStrongMemory
+                                  capacity:8];
+    }
+}
+
+// v1.3.1：记录「我们最近一次写入的缩放值」（我方两处写入各记一次：
+// ①钩子缩放分支 ②gReapply 回写分支）。
+// App 常在 setActive/快速调音后把它读到的当前音量（= 我们的输出）原样 set 回来；
+// 若照单登记为新基准，下一轮再乘系数就是 factor^n 指数衰减——
+// B站概念版 11-04 09:02 实锤：0.5112→0.2614→…→0.0000 两秒塌 0，且基准被
+// 污染成 ~0 后，系数恢复 1.0 的回写仍写 0，静音持续到 App 重设音量为止。
+static void VMLastWrittenSet(id obj, float v) {
+    if (!obj || !(v >= 0.0f)) return;
+    pthread_mutex_lock(&gBaseLock);
+    VMBaseLockInit();
+    [gLastWritten setObject:@(v) forKey:obj];
+    pthread_mutex_unlock(&gBaseLock);
+}
+
+// 传入值 ≈ 我们上次写入的值 → 是 echo，不是 App 的新意图：
+// 不登记基准、原样放行（该值已是 base×f；系数若刚变过，0.5s 轮询回写会纠正）。
+// 容差 0.001：日志实测 echo 是读回原值精确相等，留余量吸收 CGFloat 转换误差；
+// 人类滑块的调节粒度远大于此，不会误伤真调节。
+static BOOL VMLastWrittenHit(id obj, float v) {
+    BOOL hit = NO;
+    pthread_mutex_lock(&gBaseLock);
+    VMBaseLockInit();
+    NSNumber *w = [gLastWritten objectForKey:obj];
+    if (w) {
+        float d = v - [w floatValue];
+        hit = (d < 0.0f ? -d : d) < 0.001f;
+    }
+    pthread_mutex_unlock(&gBaseLock);
+    return hit;
 }
 
 static void VMRegSet(id obj, float base) {
@@ -1344,6 +1392,11 @@ static void VMMixInstallHooks(void) {
 %hook AVPlayer
 - (void)setVolume:(float)volume {
     if (gReapply) {
+        VMLastWrittenSet(self, volume);           // v1.3.1：回写也是我方输出，记下供 echo 比对
+        %orig(volume);
+        return;
+    }
+    if (VMLastWrittenHit(self, volume)) {         // v1.3.1：echo → 不登记基准，原样放行
         %orig(volume);
         return;
     }
@@ -1354,6 +1407,7 @@ static void VMMixInstallHooks(void) {
         if (!(nv >= 0.0f)) nv = 0.0f;
         if (nv > 1.0f) nv = 1.0f;
         gFallbackDirty = 1;
+        VMLastWrittenSet(self, nv);               // v1.3.1
         VMLogT([NSString stringWithFormat:@"备用层(AVPlayer) %.4f × %.4f → %.4f",
                 (double)volume, (double)f, (double)nv]);
         %orig(nv);
@@ -1370,6 +1424,11 @@ static void VMMixInstallHooks(void) {
 %hook AVAudioPlayer
 - (void)setVolume:(float)volume {
     if (gReapply) {
+        VMLastWrittenSet(self, volume);           // v1.3.1
+        %orig(volume);
+        return;
+    }
+    if (VMLastWrittenHit(self, volume)) {         // v1.3.1：echo → 不登记基准，原样放行
         %orig(volume);
         return;
     }
@@ -1380,6 +1439,7 @@ static void VMMixInstallHooks(void) {
         if (!(nv >= 0.0f)) nv = 0.0f;
         if (nv > 1.0f) nv = 1.0f;
         gFallbackDirty = 1;
+        VMLastWrittenSet(self, nv);               // v1.3.1
         VMLogT([NSString stringWithFormat:@"备用层(AVAudioPlayer) %.4f × %.4f → %.4f",
                 (double)volume, (double)f, (double)nv]);
         %orig(nv);
@@ -1396,6 +1456,11 @@ static void VMMixInstallHooks(void) {
 %hook AVSampleBufferAudioRenderer
 - (void)setVolume:(float)volume {
     if (gReapply) {
+        VMLastWrittenSet(self, volume);           // v1.3.1
+        %orig(volume);
+        return;
+    }
+    if (VMLastWrittenHit(self, volume)) {         // v1.3.1：echo → 不登记基准，原样放行
         %orig(volume);
         return;
     }
@@ -1406,6 +1471,7 @@ static void VMMixInstallHooks(void) {
         if (!(nv >= 0.0f)) nv = 0.0f;
         if (nv > 1.0f) nv = 1.0f;
         gFallbackDirty = 1;
+        VMLastWrittenSet(self, nv);               // v1.3.1
         VMLogT([NSString stringWithFormat:@"备用层(AVSampleBufferAudioRenderer) %.4f × %.4f → %.4f",
                 (double)volume, (double)f, (double)nv]);
         %orig(nv);
@@ -1583,7 +1649,7 @@ static void VMStartEngine(void) {
 
             float forced = VMReadForceFile();
 
-            VMLog(@"=== v1.3.0 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f",
+            VMLog(@"=== v1.3.1 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f",
                   bid, enabled, skip, isExt, gVMAQDebug, (double)forced);
 
             // ① 全量路径探测（一次性，把真相写进日志）

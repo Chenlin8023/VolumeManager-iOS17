@@ -1,10 +1,10 @@
 Package: com.local.volmanaudioqueue
 Name: VolManAudioQueue
-Version: 1.3.0
+Version: 1.3.1
 Architecture: iphoneos-arm64
 Description: VolumeManager 每 App 音量引擎（补丁包，需已装原版面板）。
  功能：每个 App 单独调音量（最低静音）；多 App 同时播放；改完立即生效。
- 修复：静音或低音量在长时间播放后失效（恢复原音量）。
+ 修复：静音或低音量在长时间播放后失效；快速调音时音量骤降（echo 基准污染）。
  仅含音量引擎与混音层，不含面板与 HUD。
  提示：App 若用 JailFools 等工具注入过，升级后需重新注入引擎。
 Maintainer: local
