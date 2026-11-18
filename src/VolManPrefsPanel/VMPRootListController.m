@@ -1,5 +1,5 @@
 /*
- * VMPRootListController.m —— 根页（v3 纯 UIKit 自绘）
+ * VMPRootListController.m —— 根页（v4：PSListController 壳 + 自绘表）
  * Section 0：总开关（isEnabledManagementAppVolume，引擎热轮询即时生效）
  *            启用混音（vmMixEnabled，引擎 ctor 读取，重启 App 生效）
  * Section 1：应用白名单（push VMPWhitelistController）
@@ -8,17 +8,49 @@
 
 @implementation VMPRootListController
 
+// PS 的 plain-init 创建路径（v2 diag 实锤：入口创建走 plain init）
 - (instancetype)init {
-    // 设置面板观感：内嵌分组样式；PS 的 plain-init 创建路径走这里
-    return [self initWithStyle:UITableViewStyleInsetGrouped];
-}
-
-- (instancetype)initWithStyle:(UITableViewStyle)style {
-    if ((self = [super initWithStyle:style])) {
-        self.title = @"音量管理器";
-        VMPDiagLog(@"root v3 init: 样式=%lu", (unsigned long)style);
+    if ((self = [super init])) {
+        VMPDiagHierarchy(self, @"root-plain-init");
     }
     return self;
+}
+
+// PS 契约：controllerForSpecifier: 可能走 initWithSpecifier:（无设防）
+- (instancetype)initWithSpecifier:(PSSpecifier *)specifier {
+    if ((self = [super init])) {
+        VMPDiagHierarchy(self, @"root-initSpec");
+    }
+    return self;
+}
+
+// v4 核心：loadView 自绘表（PS 的 specifier 表格完全旁路）
+- (void)loadView {
+    UITableView *tv = [[UITableView alloc] initWithFrame:CGRectZero
+                                                   style:UITableViewStyleInsetGrouped];
+    tv.dataSource = self;
+    tv.delegate = self;
+    tv.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.view = tv;
+    _vmpTable = tv;
+    // 基类的 table 属性同步指向自绘表（PS 内部若触碰则作用于自绘表）
+    @try { [self setValue:tv forKey:@"table"]; } @catch (NSException *e) { }
+    VMPDiagLog(@"root loadView: 自绘表就绪");
+}
+
+// ── 防御性覆盖：PS 内部触碰 specifier 机制时不破坏自绘表 ──
+- (void)setSpecifiers:(NSMutableArray *)specifiers { /* 忽略 */ }
+- (void)reloadSpecifiers { [_vmpTable reloadData]; }
+- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target bundle:(NSBundle *)bundle {
+    return [NSMutableArray new];
+}
+- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target {
+    return [NSMutableArray new];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [_vmpTable reloadData];   // 开关状态回流（从别的页面回来时刷新）
 }
 
 #pragma mark - 数据
@@ -44,43 +76,63 @@
 
 #pragma mark - 行
 
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    static NSString *switchId = @"vmpSwitch";
-    static NSString *linkId   = @"vmpLink";
-
-    UITableViewCell *cell;
-    if (indexPath.section == 0) {
-        cell = [tableView dequeueReusableCellWithIdentifier:switchId];
-        if (!cell) {
-            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                          reuseIdentifier:switchId];
-            UISwitch *sw = [UISwitch new];
-            sw.onTintColor = [UIColor systemGreenColor];
-            [sw addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
-                UISwitch *s = (UISwitch *)a.sender;
-                NSIndexPath *ip = [self.tableView indexPathForCell:(UITableViewCell *)s.superview.superview];
-                if (ip.row == 0) {
-                    VMPMasterEnabledWrite(s.on);
-                    VMPPostSettingChanged();
-                } else {
-                    VMPMixEnabledWrite(s.on);
-                }
-            }] forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = sw;
-        }
-        UISwitch *sw = (UISwitch *)cell.accessoryView;
-        cell.textLabel.text = indexPath.row == 0 ? @"启用音量管理" : @"启用混音（多应用同播）";
-        sw.on = indexPath.row == 0 ? VMPMasterEnabledRead() : VMPMixEnabledRead();
-    } else {
-        cell = [tableView dequeueReusableCellWithIdentifier:linkId];
-        if (!cell) {
-            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                          reuseIdentifier:linkId];
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        }
-        cell.textLabel.text = @"应用白名单";
+- (UITableViewCell *)masterCell:(UITableView *)tv {
+    static NSString *id = @"vmpMaster";
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:id];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                      reuseIdentifier:id];
+        UISwitch *sw = [UISwitch new];
+        sw.onTintColor = [UIColor systemGreenColor];
+        [sw addTarget:self action:@selector(masterToggled:) forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = sw;
     }
+    cell.textLabel.text = @"启用音量管理";
+    ((UISwitch *)cell.accessoryView).on = VMPMasterEnabledRead();
     return cell;
+}
+
+- (UITableViewCell *)mixCell:(UITableView *)tv {
+    static NSString *id = @"vmpMix";
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:id];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                      reuseIdentifier:id];
+        UISwitch *sw = [UISwitch new];
+        sw.onTintColor = [UIColor systemGreenColor];
+        [sw addTarget:self action:@selector(mixToggled:) forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = sw;
+    }
+    cell.textLabel.text = @"启用混音（多应用同播）";
+    ((UISwitch *)cell.accessoryView).on = VMPMixEnabledRead();
+    return cell;
+}
+
+- (UITableViewCell *)whitelistCell:(UITableView *)tv {
+    static NSString *id = @"vmpWhitelistLink";
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:id];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                      reuseIdentifier:id];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    }
+    cell.textLabel.text = @"应用白名单";
+    return cell;
+}
+
+- (void)masterToggled:(UISwitch *)sw {
+    VMPMasterEnabledWrite(sw.on);
+    VMPPostSettingChanged();
+}
+- (void)mixToggled:(UISwitch *)sw {
+    VMPMixEnabledWrite(sw.on);
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == 0) {
+        return indexPath.row == 0 ? [self masterCell:tableView] : [self mixCell:tableView];
+    }
+    return [self whitelistCell:tableView];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {

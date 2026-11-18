@@ -1,24 +1,50 @@
 /*
- * VMPWhitelistController.m —— 应用白名单页（v3 纯 UIKit 自绘）
- * Section 0：每个应用一行（图标 + 名称 + 注入开关 UISwitch）
- * Section 1：已启用应用的音量调节入口（点击 push 滑杆页）
+ * VMPWhitelistController.m —— 应用白名单页（v4：PSListController 壳 + 自绘表）
+ * Section 0：每个应用一行（图标 + 名称 + bid + 注入开关 UISwitch）
+ * Section 1：已启用应用的音量调节入口（push 滑杆页）
  * 种子语义：白名单文件不存在时，首次进入按默认值创建一次
  * （音频类 + volumeInfo 已配置 且非系统应用 = 勾）；之后文件即唯一真相。
+ * 开关行用 tag 定位（cell 复用时 tag 随行更新，handler 读 self.apps[tag]）。
  */
 #import "VMPControllers.h"
 
 @implementation VMPWhitelistController
 
 - (instancetype)init {
-    return [self initWithStyle:UITableViewStyleInsetGrouped];
-}
-
-- (instancetype)initWithStyle:(UITableViewStyle)style {
-    if ((self = [super initWithStyle:style])) {
-        self.title = @"应用白名单";
-        VMPDiagLog(@"whitelist v3 init");
+    if ((self = [super init])) {
+        VMPDiagHierarchy(self, @"whitelist-plain-init");
     }
     return self;
+}
+
+- (instancetype)initWithSpecifier:(PSSpecifier *)specifier {
+    if ((self = [super init])) {
+        VMPDiagHierarchy(self, @"whitelist-initSpec");
+    }
+    return self;
+}
+
+- (void)loadView {
+    UITableView *tv = [[UITableView alloc] initWithFrame:CGRectZero
+                                                   style:UITableViewStyleInsetGrouped];
+    tv.dataSource = self;
+    tv.delegate = self;
+    tv.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.view = tv;
+    _vmpTable = tv;
+    @try { [self setValue:tv forKey:@"table"]; } @catch (NSException *e) { }
+    self.title = @"应用白名单";
+    VMPDiagLog(@"whitelist loadView: 自绘表就绪");
+}
+
+// 防御性覆盖（同根页）
+- (void)setSpecifiers:(NSMutableArray *)specifiers { /* 忽略 */ }
+- (void)reloadSpecifiers { [_vmpTable reloadData]; }
+- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target bundle:(NSBundle *)bundle {
+    return [NSMutableArray new];
+}
+- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target {
+    return [NSMutableArray new];
 }
 
 - (void)viewDidLoad {
@@ -38,7 +64,7 @@
         dispatch_async(dispatch_get_main_queue(), ^{
             self.apps = apps;
             [self finishSeedingIfNeeded];
-            [self.tableView reloadData];
+            [_vmpTable reloadData];
             VMPDiagLog(@"whitelist: 扫描完成 %lu 项", (unsigned long)apps.count);
         });
     });
@@ -61,6 +87,15 @@
     if (self.enabled) return self.enabled;
     self.enabled = [VMPWhitelistRead() mutableCopy];
     return self.enabled;
+}
+
+- (NSArray<VMPAppEntry *> *)enabledApps {
+    NSMutableArray<VMPAppEntry *> *a = [NSMutableArray array];
+    NSMutableArray<NSString *> *en = [self currentEnabled];
+    for (VMPAppEntry *e in self.apps) {
+        if ([en containsObject:e.bid]) [a addObject:e];
+    }
+    return a;
 }
 
 #pragma mark - 数据
@@ -90,73 +125,78 @@
     return @"点按行进入滑杆，音量即时生效（0 = 静音）；未列出的应用音量为 1.0。";
 }
 
-- (NSArray<VMPAppEntry *> *)enabledApps {
-    NSMutableArray<VMPAppEntry *> *a = [NSMutableArray array];
-    NSMutableArray<NSString *> *en = [self currentEnabled];
-    for (VMPAppEntry *e in self.apps) {
-        if ([en containsObject:e.bid]) [a addObject:e];
-    }
-    return a;
-}
-
 #pragma mark - 行
 
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    static NSString *appCellId   = @"vmpApp";
-    static NSString *volumeCellId = @"vmpVolumeLink";
+- (UITableViewCell *)appCell:(UITableView *)tv row:(NSInteger)row {
+    static NSString *id = @"vmpApp";
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:id];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                      reuseIdentifier:id];
+        UISwitch *sw = [UISwitch new];
+        sw.onTintColor = [UIColor systemGreenColor];
+        [sw addTarget:self action:@selector(injectToggled:) forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = sw;
+    }
+    VMPAppEntry *e = (row < (NSInteger)self.apps.count) ? self.apps[row] : nil;
+    if (!e) {
+        cell.textLabel.text = @"（扫描中…）";
+        cell.detailTextLabel.text = nil;
+        cell.imageView.image = nil;
+        ((UISwitch *)cell.accessoryView).hidden = YES;
+        return cell;
+    }
+    ((UISwitch *)cell.accessoryView).hidden = NO;
+    ((UISwitch *)cell.accessoryView).tag = row;
+    NSString *title = e.name;
+    if (e.isSystem) title = [title stringByAppendingString:@"（系统）"];
+    if (e.hasAudioMode) title = [@"♪ " stringByAppendingString:title];
+    cell.textLabel.text = title;
+    cell.detailTextLabel.text = e.bid;
+    cell.imageView.image = e.icon;
+    ((UISwitch *)cell.accessoryView).on = [[self currentEnabled] containsObject:e.bid];
+    return cell;
+}
 
-    UITableViewCell *cell;
-    if (indexPath.section == 0) {
-        cell = [tableView dequeueReusableCellWithIdentifier:appCellId];
-        if (!cell) {
-            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
-                                          reuseIdentifier:appCellId];
-            UISwitch *sw = [UISwitch new];
-            sw.onTintColor = [UIColor systemGreenColor];
-            [sw addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
-                UISwitch *s = (UISwitch *)a.sender;
-                NSIndexPath *ip = [self.tableView indexPathForCell:(UITableViewCell *)s.superview.superview];
-                VMPAppEntry *e = (ip.row < (NSInteger)self.apps.count) ? self.apps[ip.row] : nil;
-                if (!e) return;
-                NSMutableArray *en = [self currentEnabled];
-                if (s.on) {
-                    if (![en containsObject:e.bid]) [en addObject:e.bid];
-                } else {
-                    [en removeObject:e.bid];
-                }
-                VMPWhitelistWrite([en copy]);
-                VMPDiagLog(@"whitelist: %@ → %@", e.bid, s.on ? @"开" : @"关");
-                [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
-                              withRowAnimation:UITableViewRowAnimationNone];
-            }] forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = sw;
-        }
-        if (indexPath.row < (NSInteger)self.apps.count) {
-            VMPAppEntry *e = self.apps[indexPath.row];
-            NSString *title = e.name;
-            if (e.isSystem) title = [title stringByAppendingString:@"（系统）"];
-            if (e.hasAudioMode) title = [@"♪ " stringByAppendingString:title];
-            cell.textLabel.text = title;
-            cell.detailTextLabel.text = e.bid;
-            cell.imageView.image = e.icon;
-            ((UISwitch *)cell.accessoryView).on =
-                [[self currentEnabled] containsObject:e.bid];
-        }
+- (UITableViewCell *)volumeLinkCell:(UITableView *)tv row:(NSInteger)row {
+    static NSString *id = @"vmpVolumeLink";
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:id];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                      reuseIdentifier:id];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    }
+    NSArray<VMPAppEntry *> *enabledApps = [self enabledApps];
+    if (row < (NSInteger)enabledApps.count) {
+        cell.textLabel.text = enabledApps[row].name;
     } else {
-        cell = [tableView dequeueReusableCellWithIdentifier:volumeCellId];
-        if (!cell) {
-            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                          reuseIdentifier:volumeCellId];
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        }
-        NSArray<VMPAppEntry *> *enabledApps = [self enabledApps];
-        if (indexPath.row < (NSInteger)enabledApps.count) {
-            cell.textLabel.text = enabledApps[indexPath.row].name;
-        } else {
-            cell.textLabel.text = @"（暂无已启用的应用）";
-        }
+        cell.textLabel.text = @"（暂无已启用的应用）";
     }
     return cell;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == 0) {
+        return [self appCell:tableView row:indexPath.row];
+    }
+    return [self volumeLinkCell:tableView row:indexPath.row];
+}
+
+- (void)injectToggled:(UISwitch *)sw {
+    NSInteger row = sw.tag;
+    if (row >= (NSInteger)self.apps.count) return;
+    VMPAppEntry *e = self.apps[row];
+    NSMutableArray *en = [self currentEnabled];
+    if (sw.on) {
+        if (![en containsObject:e.bid]) [en addObject:e.bid];
+    } else {
+        [en removeObject:e.bid];
+    }
+    VMPWhitelistWrite([en copy]);
+    VMPDiagLog(@"whitelist: %@ → %@", e.bid, sw.on ? @"开" : @"关");
+    // 音量调节段跟随勾选变化
+    NSIndexSet *sec = [NSIndexSet indexSetWithIndex:1];
+    [_vmpTable reloadSections:sec withRowAnimation:UITableViewRowAnimationNone];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
