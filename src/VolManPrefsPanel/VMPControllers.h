@@ -37,12 +37,12 @@
 @property (nonatomic, weak) id<VMPTableSource> owner;
 @end
 
-@interface VMPRootListController : PSListController {
+@interface VMPRootListController : PSListController <VMPTableSource> {
     UITableView *_vmpTable;
 }
 @end
 
-@interface VMPWhitelistController : PSListController {
+@interface VMPWhitelistController : PSListController <VMPTableSource> {
     UITableView *_vmpTable;
 }
 @property (nonatomic, strong) NSArray<VMPAppEntry *> *apps;
@@ -51,7 +51,7 @@
 @property (nonatomic, assign) BOOL seeding;
 @end
 
-@interface VMPVolumeController : PSListController {
+@interface VMPVolumeController : PSListController <VMPTableSource> {
     UITableView *_vmpTable;
 }
 @property (nonatomic, copy) NSString *bid;
