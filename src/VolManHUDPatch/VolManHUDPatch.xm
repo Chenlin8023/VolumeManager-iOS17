@@ -1,6 +1,11 @@
 /*
- * VolManHUDPatch v0.2 —— 音量面板（HUD）透明化运行时补丁（v2.0 步骤②，docs/05 §四.2）
+ * VolManHUDPatch v0.3 —— 音量面板（HUD）透明化运行时补丁（v2.0 步骤②，docs/05 §四.2）
  * ============================================================================
+ * v0.3  实机反馈修正（2026-11-18）：①透明化已实机达成（扫描式，磨砂消失）；
+ *       ②方法表 dump 改已知类名清单直接枚举——v0.2 的
+ *       objc_copyClassNamesForImage 实机静默返回空且代码静默 return（违反
+ *       「静默失败必须留日志」）；③日志时间戳改 strftime 本地 24h
+ *       （v0.2 的 descriptionWithLocale 是 UTC）。
  * 为什么是独立模块而不是引擎分支：引擎是 arm64 单切片，SpringBoard/设置等
  * arm64e 系统进程会静默拒载（硬规则 3；2026-11-18 实测定案——中央日志从未
  * 生成过、PrefsClean 运行时层从未在设置跑过，rootless 线 dylib 只进 App 进程）。
@@ -37,6 +42,7 @@
 #import <mach-o/dyld.h>
 #import <dispatch/dispatch.h>
 #import <stdio.h>
+#import <time.h>
 
 // ===========================================================================
 // 路径与开关
@@ -78,8 +84,15 @@ static void VHPLog(NSString *fmt, ...) {
     va_end(ap);
     NSLog(@"[VolManHUDPatch] %@", msg);
 
-    NSString *line = [NSString stringWithFormat:@"[%@] %@\n",
-        [[NSDate date] descriptionWithLocale:nil], msg];
+    // 本地 24 小时制时间戳（strftime/localtime_r，与引擎日志同款；
+    // v0.2 用 descriptionWithLocale 打出的是 UTC，用户要求随系统 24h）
+    char ts[32] = "?";
+    time_t tt = time(NULL);
+    struct tm tmv;
+    if (localtime_r(&tt, &tmv)) {
+        strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+    }
+    NSString *line = [NSString stringWithFormat:@"[%s] %@\n", ts, msg];
 
     for (NSString *d in VHPDirs()) {
         VHPAppendFile([d stringByAppendingPathComponent:@"vmaq-hudpatch.log"], line);
@@ -232,22 +245,37 @@ static void VHPStartSweep(void) {
 }
 
 // ===========================================================================
-// 方法表 dump（v0.2）：枚举 HUD 镜像全部类 + 自有实例方法
-// （class_copyMethodList 不含继承——这就是真实可挂表面）。
-// 为下一轮「扫描式 → 精确挂钩」提供依据。
+// 方法表 dump（v0.3）：按已知类名清单直接枚举。
+// v0.2 的 objc_copyClassNamesForImage 在实机静默返回空且我写了静默 return
+// （违反「静默失败必须留日志」）——改为已知类名（10 个，来自 v0.1 期二进制
+// 分析）逐一 objc_getClass + class_copyMethodList（不含继承），每步有日志。
+// class_copyMethodList 不含继承——这就是真实可挂表面。
 // ===========================================================================
-static void VHPDumpImageMethods(const char *imgPath) {
-    if (!imgPath) return;
+static const char *VHPKnownClasses[] = {
+    "_TtC18VolumeManagerSBHUD11VMHUDWindow",
+    "_TtC18VolumeManagerSBHUD16VMViewController",
+    "_TtC18VolumeManagerSBHUD9VMHUDView",
+    "_TtC18VolumeManagerSBHUD20VMHUDScrollContainer",
+    "_TtC18VolumeManagerSBHUD15SpringBoardHook",
+    "_TtC18VolumeManagerSBHUD19SBVolumeControlHook",
+    "_TtC18VolumeManagerSBHUD7VMPrefs",
+    "_TtC18VolumeManagerSBHUD9VMProcess",
+    "_TtC18VolumeManagerSBHUD5VMXpc",
+    "_TtC18VolumeManagerSBHUD13VMFileManager",
+};
+
+static void VHPDumpImageMethods(void) {
     @try {
-        unsigned int n = 0;
-        const char **names = objc_copyClassNamesForImage(imgPath, &n);
-        if (!names || n == 0) { if (names) free(names); return; }
+        int total = (int)(sizeof(VHPKnownClasses) / sizeof(VHPKnownClasses[0]));
+        VHPLog(@"方法表：开始枚举（已知类清单 %d 个）", total);
         NSMutableString *rep = [NSMutableString
-            stringWithFormat:@"=== HUD 镜像类与方法表（%u 个类）===\n", n];
-        for (unsigned int i = 0; i < n; i++) {
-            Class c = objc_getClass(names[i]);
-            [rep appendFormat:@"— %s —\n", names[i]];
+            stringWithString:@"=== HUD 镜像类与方法表（自有实例方法，不含继承）===\n"];
+        int registered = 0;
+        for (int i = 0; i < total; i++) {
+            Class c = objc_getClass(VHPKnownClasses[i]);
+            [rep appendFormat:@"— %s —\n", VHPKnownClasses[i]];
             if (!c) { [rep appendString:@"   (类未注册)\n"]; continue; }
+            registered++;
             unsigned int m = 0;
             Method *ms = class_copyMethodList(c, &m);
             for (unsigned int j = 0; j < m; j++) {
@@ -257,7 +285,7 @@ static void VHPDumpImageMethods(const char *imgPath) {
             if (ms) free(ms);
             if (m == 0) [rep appendString:@"   (无自有实例方法)\n"];
         }
-        free(names);
+        [rep appendFormat:@"=== 已注册 %d/%d 类 ===\n", registered, total];
         VHPLog(@"%@", rep);
     } @catch (NSException *e) {
         VHPLog(@"方法表 dump 异常: %@", e);
@@ -330,7 +358,7 @@ static void VHPImageAdded(const struct mach_header *mh, intptr_t slide) {
     if (dladdr((const void *)mh, &info) && info.dli_fname &&
         strstr(info.dli_fname, "/VolumeManagerSBHUD.dylib")) {
         VHPAttach();
-        if (gVHPDump) VHPDumpImageMethods(info.dli_fname);
+        if (gVHPDump) VHPDumpImageMethods();
     }
 }
 
