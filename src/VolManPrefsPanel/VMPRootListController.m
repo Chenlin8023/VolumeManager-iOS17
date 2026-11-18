@@ -51,9 +51,18 @@
     return [NSMutableArray new];
 }
 
+// v4.2：覆盖 viewDidLoad 且不调 super——基类实现内含 PS 内部工作（上一份
+// hang .ips：主线程用户态 CPU 空转 9 秒，基类 viewDidLoad 是主线程上最后
+// 一个已确认的 PS 入口）。自绘表在 loadView 已就绪， reloadData 由本类负责。
+- (void)viewDidLoad {
+    VMPDiagLog(@"root viewDidLoad: 进入（跳过基类）");
+}
+
 - (void)viewWillAppear:(BOOL)animated {
+    VMPDiagLog(@"root viewWillAppear: super 前");
     [super viewWillAppear:animated];
-    [_vmpTable reloadData];   // 开关状态回流（从别的页面回来时刷新）
+    VMPDiagLog(@"root viewWillAppear: super 后");
+    [_vmpTable reloadData];
 }
 
 #pragma mark - 数据

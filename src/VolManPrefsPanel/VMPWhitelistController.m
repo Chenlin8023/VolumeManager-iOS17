@@ -51,7 +51,7 @@
 }
 
 - (void)viewDidLoad {
-    [super viewDidLoad];
+    VMPDiagLog(@"whitelist viewDidLoad: 进入（跳过基类）");
     if (self.scanned) return;
     self.scanned = YES;
 
