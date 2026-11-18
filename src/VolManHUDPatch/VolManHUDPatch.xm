@@ -1,11 +1,13 @@
 /*
- * VolManHUDPatch v0.3 —— 音量面板（HUD）透明化运行时补丁（v2.0 步骤②，docs/05 §四.2）
+ * VolManHUDPatch v0.4 —— 音量面板（HUD）透明化运行时补丁（v2.0 步骤②，docs/05 §四.2）
  * ============================================================================
- * v0.3  实机反馈修正（2026-11-18）：①透明化已实机达成（扫描式，磨砂消失）；
- *       ②方法表 dump 改已知类名清单直接枚举——v0.2 的
- *       objc_copyClassNamesForImage 实机静默返回空且代码静默 return（违反
- *       「静默失败必须留日志」）；③日志时间戳改 strftime 本地 24h
- *       （v0.2 的 descriptionWithLocale 是 UTC）。
+ * v0.4  时序修正（2026-11-18）：v0.3 实机实锤 dyld add_image 回调时 ObjC 类
+ *       尚未注册（已知类清单 0/10 全部"类未注册"）——dyld 回调机制整体弃用，
+ *       挂载与方法表 dump 挂靠扫描周期（类就绪后第一个 0.3s tick 自动完成，
+ *       dump 不再依赖呼出 HUD；补丁关也不影响 dump）。同时修正误导日志：
+ *       类未就绪时不再打出「HUD 类已加载」。透明化已实机达成（v0.2 起，
+ *       用户确认磨砂消失且 0.3s 闪现无感）——扫描式为最终方案，精确挂钩
+ *       仅在日后需要时借方法表实施。
  * 为什么是独立模块而不是引擎分支：引擎是 arm64 单切片，SpringBoard/设置等
  * arm64e 系统进程会静默拒载（硬规则 3；2026-11-18 实测定案——中央日志从未
  * 生成过、PrefsClean 运行时层从未在设置跑过，rootless 线 dylib 只进 App 进程）。
@@ -38,8 +40,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import <dlfcn.h>
-#import <mach-o/dyld.h>
 #import <dispatch/dispatch.h>
 #import <stdio.h>
 #import <time.h>
@@ -219,8 +219,20 @@ static void VHPStartSweep(void) {
     dispatch_source_set_timer(gVHPSweep, DISPATCH_TIME_NOW,
                               (uint64_t)(0.3 * NSEC_PER_SEC), 0);
     dispatch_source_set_event_handler(gVHPSweep, ^{
-        if (!gVHPPatch) return;
         @try {
+            // v0.4：挂载与方法表 dump 挂靠扫描周期——HUD 类注册完成后的
+            // 第一个 tick 自动完成（dyld add_image 回调时 ObjC 类尚未注册，
+            // v0.3 实机 0/10 实锤）。补丁关（vmaq-hud-opaque）也不影响 dump。
+            if (!gAttached) {
+                Class vc   = objc_getClass("_TtC18VolumeManagerSBHUD16VMViewController");
+                Class view = objc_getClass("_TtC18VolumeManagerSBHUD9VMHUDView");
+                if (vc || view) {
+                    VHPAttach();
+                    if (gVHPDump && !gDumpDone) VHPDumpImageMethods();
+                }
+            }
+
+            if (!gVHPPatch) return;
             id app = ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIApplication"),
                                                      @selector(sharedApplication));
             if (![app respondsToSelector:@selector(windows)]) return;
@@ -324,11 +336,14 @@ static void VHPViewLayoutHook(id self, SEL _cmd) {
 // 对已加载的 HUD 类装挂钩（防误伤守卫过滤后按优先级取第一个命中的）。
 // 挂点候选：VMViewController.viewDidAppear:/viewWillAppear:/viewDidLoad、
 //           VMHUDView.didMoveToWindow/layoutSubviews。
-// v0.1 实机：全部被守卫拒绝（Swift 类未覆写）——保留尝试，命中则精确生效。
+// 调用时机由扫描周期把控：类未注册（objc_getClass 全 nil）时**静默返回**——
+// v0.3 实机证明 dyld add_image 回调时 ObjC 类尚未注册，此前的
+// 「HUD 类已加载但…」日志在类未就绪时也会打出，属误导，v0.4 修正。
 static void VHPAttach(void) {
     if (gAttached) return;
     Class vc   = objc_getClass("_TtC18VolumeManagerSBHUD16VMViewController");
     Class view = objc_getClass("_TtC18VolumeManagerSBHUD9VMHUDView");
+    if (!vc && !view) return;   // 类未注册，等下一个扫描周期
 
     if (vc) {
         IMP o = VHPSwizzle(vc, @selector(viewDidAppear:), (IMP)&VHPVCAppearHook);
@@ -349,35 +364,13 @@ static void VHPAttach(void) {
         if (o) { gOrigViewLayout = o; gAttached = 1;
                  VHPLog(@"已挂 VMHUDView layoutSubviews"); return; }
     }
-    VHPLog(@"HUD 类已加载但无可挂生命周期方法（扫描式补丁接管，方法表 dump 可定精确挂点）");
-}
-
-// dyld 镜像回调（C 函数指针）：HUD 镜像一出现即装 + 方法表 dump
-static void VHPImageAdded(const struct mach_header *mh, intptr_t slide) {
-    Dl_info info;
-    if (dladdr((const void *)mh, &info) && info.dli_fname &&
-        strstr(info.dli_fname, "/VolumeManagerSBHUD.dylib")) {
-        VHPAttach();
-        if (gVHPDump) VHPDumpImageMethods();
-    }
-}
-
-static void VHPInstall(void) {
-    const char *suffix = "/VolumeManagerSBHUD.dylib";
-    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        const char *n = _dyld_get_image_name(i);
-        if (n && strstr(n, suffix)) {
-            VHPLog(@"HUD 镜像已加载，直接挂");
-            VHPAttach();
-            return;
-        }
-    }
-    _dyld_register_func_for_add_image(VHPImageAdded);
-    VHPLog(@"等待 VolumeManagerSBHUD.dylib 加载（dyld 回调已挂）");
+    VHPLog(@"HUD 类已注册但无可挂生命周期方法（扫描式补丁接管）");
 }
 
 // ===========================================================================
 // 入口
+//   v0.4：dyld add_image 回调机制整体弃用——回调时 ObjC 类尚未注册
+//   （v0.3 实机 0/10），挂载/ dump 全部由扫描周期在类就绪后接管。
 // ===========================================================================
 %ctor {
     @autoreleasepool {
@@ -395,10 +388,10 @@ static void VHPInstall(void) {
                (int)[[NSProcessInfo processInfo] processIdentifier],
                gVHPPatch, gVHPDump);
 
-        if (gVHPPatch) {
-            // 扫描式补丁进主队列启动（UIKit 访问必须在主线程）
+        // 扫描周期承担三件事：挂载（类就绪后）→ 方法表 dump（开关开时）→
+        // 窗口清理（补丁开时）。主队列启动（UIKit 访问必须在主线程）。
+        if (gVHPPatch || gVHPDump) {
             dispatch_async(dispatch_get_main_queue(), ^{ VHPStartSweep(); });
         }
-        VHPInstall();
     }
 }
