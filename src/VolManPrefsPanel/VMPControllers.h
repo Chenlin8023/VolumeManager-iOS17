@@ -12,6 +12,8 @@
  *   不破坏自绘表（PS 内部若触碰 specifier 机制，一律无害化）。
  */
 #import "VMPShared.h"
+#import <Preferences/PSListController.h>
+#import <Preferences/PSSpecifier.h>
 #import <objc/message.h>
 
 @interface VMPRootListController : PSListController {
