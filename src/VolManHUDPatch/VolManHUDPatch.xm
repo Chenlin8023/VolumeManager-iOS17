@@ -212,6 +212,10 @@ static void VHPDumpOnce(id selfVC) {
 // 只在主队列运行（UIKit 访问安全）；无 VM 窗口时一次空扫 ≈ 一个 windows
 // 数组遍历，代价可忽略。命中日志只记前 3 次，避免刷屏。
 // ===========================================================================
+// 前向声明（扫描事件处理器在类就绪时调用后文的挂载/ dump——文件序靠后）
+static void VHPAttach(void);
+static void VHPDumpImageMethods(void);
+
 static void VHPStartSweep(void) {
     if (gVHPSweep) return;
     dispatch_queue_t q = dispatch_get_main_queue();
