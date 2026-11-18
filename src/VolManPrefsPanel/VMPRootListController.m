@@ -2,44 +2,44 @@
  * VMPRootListController.m —— 根页：总开关 / 启用混音 / 应用白名单入口
  * 总开关写 prefs 域 isEnabledManagementAppVolume（引擎热轮询即时生效）；
  * 混音写 vmMixEnabled 配置（引擎 ctor 读取，重启 App 生效，页脚注明）。
+ *
+ * CI 头适配：cell: 参数是 PSCellType 枚举（PSSwitchCell 等为枚举常量，直接用
+ * 头里的名字）；specifiers ivar 自声明（基类不暴露），类声明在 VMPControllers.h。
  */
-#import "VMPShared.h"
-#import <Preferences/PSListController.h>
-#import <Preferences/PSSpecifier.h>
-
-// cell 类型常量（框架内字符串值；Theos 各版本头不齐，自行定义最稳）
-static NSString * const kCellGroup  = @"PSGroupCell";
-static NSString * const kCellSwitch = @"PSSwitchCell";
-static NSString * const kCellLink   = @"PSLinkCell";
+#import "VMPControllers.h"
 
 @implementation VMPRootListController
 
 - (NSArray *)specifiers {
-    if (!_specifiers) {
+    if (!_vmpSpecifiers) {
         PSSpecifier *g1 = [PSSpecifier groupSpecifierWithName:@"音量管理"];
-        [g1 setProperty:@"总开关关闭时，所有应用的音量调整与混音全部停止。" forKey:@"footerText"];
+        [g1 setProperty:@"总开关关闭时，所有应用的音量调整与混音全部停止。"
+                  forKey:@"footerText"];
 
         PSSpecifier *master = [PSSpecifier preferenceSpecifierNamed:@"启用音量管理"
             target:self set:@selector(setMasterValue:forSpecifier:)
             get:@selector(masterValueForSpecifier:)
-            detail:nil cell:kCellSwitch edit:nil];
+            detail:nil cell:PSSwitchCell edit:nil];
         [master setIdentifier:@"master"];
 
         PSSpecifier *mix = [PSSpecifier preferenceSpecifierNamed:@"启用混音（多应用同播）"
             target:self set:@selector(setMixValue:forSpecifier:)
             get:@selector(mixValueForSpecifier:)
-            detail:nil cell:kCellSwitch edit:nil];
+            detail:nil cell:PSSwitchCell edit:nil];
         [mix setIdentifier:@"mix"];
+        PSSpecifier *mixFoot = [PSSpecifier groupSpecifierWithName:nil];
+        [mixFoot setProperty:@"混音开关在应用下次启动时生效（引擎启动时读取）。"
+                  forKey:@"footerText"];
 
         PSSpecifier *g2 = [PSSpecifier groupSpecifierWithName:@"应用"];
         PSSpecifier *wl = [PSSpecifier preferenceSpecifierNamed:@"应用白名单"
             target:self set:NULL get:NULL
-            detail:[VMPWhitelistController class] cell:kCellLink edit:nil];
+            detail:[VMPWhitelistController class] cell:PSLinkCell edit:nil];
         [wl setIdentifier:@"whitelist"];
 
-        _specifiers = @[ g1, master, mix, g2, wl ];
+        _vmpSpecifiers = @[ g1, master, mix, mixFoot, g2, wl ];
     }
-    return _specifiers;
+    return _vmpSpecifiers;
 }
 
 - (id)masterValueForSpecifier:(PSSpecifier *)spec {
@@ -57,8 +57,9 @@ static NSString * const kCellLink   = @"PSLinkCell";
     VMPMixEnabledWrite([value boolValue]);
 }
 
-- (NSString *)navigationBarTitle {
-    return @"音量管理器";
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"音量管理器";
 }
 
 @end

@@ -3,17 +3,7 @@
  * 上下文来自 push 时的 specifier（bid / appName）。
  * 写 volumeInfo 原格式（读改写保留未知键）+ Preferences 同步副本 + settingOnChanged。
  */
-#import "VMPShared.h"
-#import <Preferences/PSListController.h>
-#import <Preferences/PSSpecifier.h>
-
-static NSString * const kCellGroup  = @"PSGroupCell";
-static NSString * const kCellSlider = @"PSSliderCell";
-
-@interface VMPVolumeController ()
-@property (nonatomic, copy) NSString *bid;
-@property (nonatomic, copy) NSString *appName;
-@end
+#import "VMPControllers.h"
 
 @implementation VMPVolumeController
 
@@ -25,30 +15,30 @@ static NSString * const kCellSlider = @"PSSliderCell";
     return self;
 }
 
+- (int)currentPercent {
+    NSDictionary *root = VMPVolumeInfoReadMutable();
+    BOOL matched = NO;
+    double v = VMPVolumeInfoGetVolume(root, self.bid, &matched);
+    return (int)round(v * 100.0);
+}
+
 - (NSArray *)specifiers {
-    if (!_specifiers) {
+    if (!_vmpSpecifiers) {
         PSSpecifier *g = [PSSpecifier groupSpecifierWithName:self.appName ?: @"音量"];
         [g setProperty:@"拖动即时生效，引擎 0.5s 轮询兜底；0 = 静音。" forKey:@"footerText"];
 
         PSSpecifier *slider = [PSSpecifier preferenceSpecifierNamed:@"音量"
             target:self set:@selector(setVolume:forSpecifier:)
             get:@selector(volumeForSpecifier:)
-            detail:nil cell:kCellSlider edit:nil];
+            detail:nil cell:PSSliderCell edit:nil];
         [slider setProperty:@(0) forKey:@"min"];
         [slider setProperty:@(100) forKey:@"max"];
-        [slider setProperty:@(@(self.currentPercent())) forKey:@"default"];
+        [slider setProperty:@(self.currentPercent) forKey:@"default"];
         [slider setIdentifier:@"volumeSlider"];
 
-        _specifiers = @[ g, slider ];
+        _vmpSpecifiers = @[ g, slider ];
     }
-    return _specifiers;
-}
-
-- (int)currentPercent {
-    NSDictionary *root = VMPVolumeInfoReadMutable();
-    BOOL matched = NO;
-    double v = VMPVolumeInfoGetVolume(root, self.bid, &matched);
-    return (int)round(v * 100.0);
+    return _vmpSpecifiers;
 }
 
 - (id)volumeForSpecifier:(PSSpecifier *)spec {
@@ -70,8 +60,9 @@ static NSString * const kCellSlider = @"PSSliderCell";
     VMPPostSettingChanged();
 }
 
-- (NSString *)navigationBarTitle {
-    return self.appName ?: @"音量";
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    self.title = self.appName ?: @"音量";
 }
 
 @end

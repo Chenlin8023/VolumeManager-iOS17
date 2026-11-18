@@ -1,24 +1,11 @@
 /*
  * VMPWhitelistController.m —— 应用白名单页（v2.0 步骤③核心页）
  * 种子语义（一句话）：白名单文件不存在时，首次进入本页按默认值创建一次
- * （音频类 + volumeInfo 已配置且非系统应用 = 勾）；文件存在后它就是唯一真相，
- * 勾选变更直接改写。这与引擎「缺失 = legacy 兼容模式」的三态裁决严丝合缝：
+ * （音频类 + volumeInfo 已配置 且非系统应用 = 勾）；文件存在后它就是唯一真相，
+ * 勾选变更直接改写。与引擎「缺失 = legacy 兼容模式」的三态裁决严丝合缝：
  * 用户进一次面板 = 显式采用白名单模式。
  */
-#import "VMPShared.h"
-#import <Preferences/PSListController.h>
-#import <Preferences/PSSpecifier.h>
-
-static NSString * const kCellGroup  = @"PSGroupCell";
-static NSString * const kCellSwitch = @"PSSwitchCell";
-static NSString * const kCellLink   = @"PSLinkCell";
-
-@interface VMPWhitelistController ()
-@property (nonatomic, strong) NSArray<VMPAppEntry *> *apps;
-@property (nonatomic, strong) NSMutableArray<NSString *> *enabled;
-@property (nonatomic, assign) BOOL scanned;
-@property (nonatomic, assign) BOOL seeding;   // 本次进入是否执行了首建补种
-@end
+#import "VMPControllers.h"
 
 @implementation VMPWhitelistController
 
@@ -27,7 +14,7 @@ static NSString * const kCellLink   = @"PSLinkCell";
     if (self.scanned) return;
     self.scanned = YES;
 
-    // 文件不存在 = 首次采用白名单模式 → 记下，扫描完成后按默认值补种
+    // 文件不存在 = 首次采用白名单模式 → 扫描完成后按默认值补种
     NSFileManager *fm = [NSFileManager defaultManager];
     BOOL fileExisted = [fm fileExistsAtPath:VMPWhitelistDataPath()]
                     || [fm fileExistsAtPath:VMPWhitelistSyncedPath()];
@@ -75,8 +62,8 @@ static NSString * const kCellLink   = @"PSLinkCell";
 
     if (self.apps.count == 0) {
         [specs addObject:[PSSpecifier groupSpecifierWithName:@"（扫描无结果）"]];
-        _specifiers = specs;
-        [super reloadSpecifiers];
+        _vmpSpecifiers = specs;
+        [self reloadSpecifiers];
         return;
     }
 
@@ -89,7 +76,7 @@ static NSString * const kCellLink   = @"PSLinkCell";
         PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:title
             target:self set:@selector(setInjectValue:forSpecifier:)
             get:@selector(injectValueForSpecifier:)
-            detail:nil cell:kCellSwitch edit:nil];
+            detail:nil cell:PSSwitchCell edit:nil];
         [sp setProperty:e.bid forKey:@"bid"];
         [specs addObject:sp];
     }
@@ -104,7 +91,7 @@ static NSString * const kCellLink   = @"PSLinkCell";
         if (![en containsObject:e.bid]) continue;
         PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:e.name
             target:self set:NULL get:NULL
-            detail:[VMPVolumeController class] cell:kCellLink edit:nil];
+            detail:[VMPVolumeController class] cell:PSLinkCell edit:nil];
         [sp setProperty:e.bid forKey:@"bid"];
         [sp setProperty:e.name forKey:@"appName"];
         [specs addObject:sp];
@@ -119,16 +106,16 @@ static NSString * const kCellLink   = @"PSLinkCell";
         [specs addObject:empty];
     }
 
-    _specifiers = specs;
-    [super reloadSpecifiers];
+    _vmpSpecifiers = specs;
+    [self reloadSpecifiers];
 }
 
 - (NSArray *)specifiers {
-    if (!_specifiers) {
+    if (!_vmpSpecifiers) {
         PSSpecifier *g = [PSSpecifier groupSpecifierWithName:@"扫描中…"];
-        _specifiers = @[ g ];
+        _vmpSpecifiers = @[ g ];
     }
-    return _specifiers;
+    return _vmpSpecifiers;
 }
 
 - (id)injectValueForSpecifier:(PSSpecifier *)spec {
@@ -148,8 +135,9 @@ static NSString * const kCellLink   = @"PSLinkCell";
     [self rebuildSpecifiers];   // 音量调节段跟随勾选变化
 }
 
-- (NSString *)navigationBarTitle {
-    return @"应用白名单";
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    self.title = @"应用白名单";
 }
 
 @end

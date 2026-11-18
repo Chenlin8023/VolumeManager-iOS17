@@ -4,6 +4,7 @@
  */
 #import "VMPShared.h"
 #import <objc/runtime.h>
+#import <objc/message.h>
 
 #pragma mark - 路径
 
@@ -170,20 +171,20 @@ void VMPPostSettingChanged(void) {
 @property (nonatomic, readonly, strong) NSURL *bundleURL;
 @end
 
-@interface LSApplicationWorkspace : NSObject
-+ (instancetype)defaultWorkspace;
-- (NSArray *)allInstalledApplications;
+// UIImage 私有图标接口（类方法引用只产生 selector 引用，无链接符号问题）
+@interface UIImage (VMPPrivateIcon)
++ (UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bid
+                                               format:(NSString *)format
+                                                scale:(CGFloat)scale;
 @end
 
 static UIImage *VMPIconForBid(NSString *bid) {
     if (!bid.length) return nil;
     // 闭源面板同款私有 API；取不到就用 nil（行内显示占位）
-    SEL sel = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
-    Method m = class_getClassMethod([UIImage class], sel);
-    if (!m) return nil;
-    id (*fn)(id, SEL, id, id, double) = (void (*)(id, SEL, id, id, double))method_getImplementation(m);
     @try {
-        return fn([UIImage class], sel, bid, @"29x29", 2.0);
+        return [UIImage _applicationIconImageForBundleIdentifier:bid
+                                                          format:@"29x29"
+                                                           scale:2.0];
     } @catch (NSException *e) {
         return nil;
     }
@@ -195,11 +196,11 @@ static UIImage *VMPIconForBid(NSString *bid) {
 NSArray<VMPAppEntry *> *VMPScanApps(void) {
     NSMutableArray<VMPAppEntry *> *out = [NSMutableArray array];
     @try {
+        // 运行时取类（不产生链接符号引用；方法体内部消息全走动态派发）
         Class wsCls = objc_getClass("LSApplicationWorkspace");
         if (!wsCls) return out;
         id ws = ((id (*)(id, SEL))objc_msgSend)((id)wsCls, @selector(defaultWorkspace));
         NSArray *apps = [ws allInstalledApplications];
-        NSMutableDictionary *nameIndex = [NSMutableDictionary dictionary];
         for (id proxy in apps) {
             NSString *bid = [proxy bundleIdentifier];
             if (!bid.length) continue;
