@@ -47,8 +47,18 @@
         [slider setIdentifier:@"volumeSlider"];
 
         _vmpSpecifiers = @[ g, slider ];
+        VMPDiagLog(@"volume specifiers 构建 2 项");
     }
     return _vmpSpecifiers;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    NSArray *specs = [self specifiers];
+    if ([self respondsToSelector:@selector(setSpecifiers:)]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(self, @selector(setSpecifiers:), specs);
+    }
+    [self reloadSpecifiers];
 }
 
 - (id)volumeForSpecifier:(PSSpecifier *)spec {

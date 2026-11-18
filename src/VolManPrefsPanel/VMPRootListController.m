@@ -64,6 +64,7 @@
         [wl setIdentifier:@"whitelist"];
 
         _vmpSpecifiers = @[ g1, master, mix, mixFoot, g2, wl ];
+        VMPDiagLog(@"root specifiers 构建 %lu 项", (unsigned long)_vmpSpecifiers.count);
     }
     return _vmpSpecifiers;
 }
@@ -86,6 +87,15 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"音量管理器";
+    // 空表修复（2026-11-19）：基类的加载流程可能直接读自身 ivar（不走我们的
+    // getter 覆写，或走 plist 加载且 plist 不存在 → 空表）。构建后把数组同步
+    // 进基类属性（setSpecifiers:）并 reloadSpecifiers，覆盖两种基类实现。
+    NSArray *specs = [self specifiers];
+    if ([self respondsToSelector:@selector(setSpecifiers:)]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(self, @selector(setSpecifiers:), specs);
+        VMPDiagLog(@"root: 基类属性已同步 %lu 项", (unsigned long)specs.count);
+    }
+    [self reloadSpecifiers];
 }
 
 @end

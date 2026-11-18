@@ -19,6 +19,7 @@
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    self.title = @"应用白名单";
     if (self.scanned) return;
     self.scanned = YES;
 
@@ -28,6 +29,9 @@
                     || [fm fileExistsAtPath:VMPWhitelistSyncedPath()];
     self.seeding = !fileExisted;
 
+    // 空表修复：占位数组同步进基类属性（同根页注释）
+    [self vmpSyncToBase];
+
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSArray<VMPAppEntry *> *apps = VMPScanApps();
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -35,6 +39,15 @@
             [self rebuildSpecifiers];
         });
     });
+}
+
+// 把 _vmpSpecifiers 同步进基类属性并 reload（基类可能直读自身 ivar，不走 getter 覆写）
+- (void)vmpSyncToBase {
+    NSArray *specs = [self specifiers];
+    if ([self respondsToSelector:@selector(setSpecifiers:)]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(self, @selector(setSpecifiers:), specs);
+    }
+    [self reloadSpecifiers];
 }
 
 - (NSMutableArray<NSString *> *)currentEnabled {
@@ -71,7 +84,7 @@
     if (self.apps.count == 0) {
         [specs addObject:[PSSpecifier groupSpecifierWithName:@"（扫描无结果）"]];
         _vmpSpecifiers = specs;
-        [self reloadSpecifiers];
+        [self vmpSyncToBase];
         return;
     }
 
@@ -115,13 +128,15 @@
     }
 
     _vmpSpecifiers = specs;
-    [self reloadSpecifiers];
+    VMPDiagLog(@"whitelist rebuild: 构建 %lu 项", (unsigned long)specs.count);
+    [self vmpSyncToBase];
 }
 
 - (NSArray *)specifiers {
     if (!_vmpSpecifiers) {
         PSSpecifier *g = [PSSpecifier groupSpecifierWithName:@"扫描中…"];
         _vmpSpecifiers = @[ g ];
+        VMPDiagLog(@"whitelist getter: 占位 1 项（扫描中）");
     }
     return _vmpSpecifiers;
 }

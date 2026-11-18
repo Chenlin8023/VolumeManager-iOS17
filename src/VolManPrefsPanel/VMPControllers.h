@@ -5,6 +5,7 @@
 #import "VMPShared.h"
 #import <Preferences/PSListController.h>
 #import <Preferences/PSSpecifier.h>
+#import <objc/message.h>
 
 @interface VMPRootListController : PSListController {
     NSArray *_vmpSpecifiers;
