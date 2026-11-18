@@ -14,7 +14,14 @@
 // （实机崩溃实锤 2026-11-18）——基类头未声明该 selector，子类自带实现走
 // [super init] 安全链（根页无上下文，空实现即可）。
 - (instancetype)initWithSpecifier:(PSSpecifier *)specifier {
-    if ((self = [super init])) { }
+    if ((self = [super init])) {
+        // 诊断（PS 契约崩溃排查）：类层级在运行时的真实形态
+        NSLog(@"[VMP] %@ init: superclass=%@ isVC=%d respSetExt=%d",
+              NSStringFromClass([self class]),
+              [self superclass] ? NSStringFromClass([self superclass]) : @"(nil)",
+              (int)[self isKindOfClass:[UIViewController class]],
+              (int)[self respondsToSelector:@selector(setExtendedLayoutIncludesOpaqueBars:)]);
+    }
     return self;
 }
 
