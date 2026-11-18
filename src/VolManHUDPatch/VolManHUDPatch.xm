@@ -1,5 +1,5 @@
 /*
- * VolManHUDPatch v0.1 —— 音量面板（HUD）透明化运行时补丁（v2.0 步骤②，docs/05 §四.2）
+ * VolManHUDPatch v0.2 —— 音量面板（HUD）透明化运行时补丁（v2.0 步骤②，docs/05 §四.2）
  * ============================================================================
  * 为什么是独立模块而不是引擎分支：引擎是 arm64 单切片，SpringBoard/设置等
  * arm64e 系统进程会静默拒载（硬规则 3；2026-11-18 实测定案——中央日志从未
@@ -8,21 +8,24 @@
  * 工具链构建（硬规则 8；本地 clang19 的 arm64e 切片过不了 PAC 关）。
  * 构建入口 = .github/workflows/hudpatch.yml；产物人工下载到
  * tools/hudpatch-prebuilt/ 由 build-rootless.sh 打入 full 包。
+ * （2026-11-18 v0.1 实机：模块被 SpringBoard 正常加载 ✅，但三个候选挂点
+ *   viewDidAppear:/viewDidLoad/didMoveToWindow 全被防误伤守卫拒绝——
+ *   闭源 Swift 类未覆写这些方法，补丁从未执行。v0.2 对策如下。）
  *
- * 职责：
- *   ① 探针（开关：数据目录放空文件 vmaq-hud-debug；ctor 读取，改后需 respring）
- *      dump 闭源 HUD（VolumeManagerSBHUD）的视图层次到日志，为透明化定挂点。
- *      一次性（每次 respring 只 dump 首次呼出）。
- *   ② 透明化（默认生效；数据目录放空文件 vmaq-hud-opaque = 恢复原样）：
- *      - 所有 UIVisualEffectView 的 effect 置 nil（磨砂玻璃摘除，保留布局占位）
- *      - HUD 自有类（类名含 VolumeManagerSBHUD）与窗口背景色清透明
- *      - 内部功能元素（音量条填充、文字颜色等 Apple 类）不动
- *   挂点：VMViewController viewDidAppear:/viewDidLoad、VMHUDView didMoveToWindow；
- *   method_setImplementation 手动挂钩；带「方法须由类自身实现」防误伤守卫
- *   （防 Swift 类未覆写目标方法时误挂父类 → 把 SpringBoard 全部视图一锅端）。
+ * v0.2 职责（双保险）：
+ *   ① 扫描式补丁（默认生效；vmaq-hud-opaque = 恢复原样）：
+ *      GCD 主队列定时器 0.3s 扫描 SpringBoard 窗口，发现 VM HUD 窗口即执行
+ *      清理（UIVisualEffectView 摘 effect + VM 自有类/窗口背景清透明）。
+ *      零生命周期假设、必定生效；代价 = 呼出瞬间 ≤0.3s 磨砂闪现。
+ *   ② 方法表 dump（开关 vmaq-hud-debug）：dyld 回调时枚举 HUD 镜像全部类
+ *      与**自有**实例方法（class_copyMethodList，不含继承），为后续把扫描式
+ *      换成精确挂钩提供真实可挂表面。
+ *   ③ 生命周期挂钩保留尝试（viewDidAppear:/viewWillAppear:/viewDidLoad/
+ *      didMoveToWindow/layoutSubviews，防误伤守卫不变）——命中则即时补丁，
+ *      未命中不影响扫描式兜底。
  *
  * 日志：NSLog + 中央数据目录 vmaq-hudpatch.log + /tmp 镜像双写
- *      （SpringBoard 为 root，中央可写；/tmp 镜像沿用 PrefsClean 双写惯例）。
+ *      （SpringBoard 为 root，中央可写——这是全 rootless 线唯一真正能落中央的组件）。
  * ============================================================================
  */
 
@@ -32,6 +35,7 @@
 #import <objc/message.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
+#import <dispatch/dispatch.h>
 #import <stdio.h>
 
 // ===========================================================================
@@ -89,10 +93,14 @@ static void VHPLog(NSString *fmt, ...) {
 static int gVHPDump        = 0;   // 探针开关（vmaq-hud-debug）
 static int gVHPPatch       = 1;   // 透明化开关（默认开；vmaq-hud-opaque 关闭）
 static IMP gOrigVCAppear   = NULL;
+static IMP gOrigVCAppearW  = NULL;
 static IMP gOrigVCLoad     = NULL;
 static IMP gOrigViewMove   = NULL;
+static IMP gOrigViewLayout = NULL;
 static int gAttached       = 0;
 static int gDumpDone       = 0;
+static dispatch_source_t gVHPSweep = nil;
+static int gVHPSweepHits   = 0;
 
 // ===========================================================================
 // 手动挂钩（防误伤守卫：方法必须由类自身实现，继承来的拒绝——
@@ -185,10 +193,87 @@ static void VHPDumpOnce(id selfVC) {
 }
 
 // ===========================================================================
-// 钩子实现（orig 先行，后处理）
+// 扫描式补丁（v0.2 主力）：0.3s 主队列定时器，发现 VM HUD 窗口即清理。
+// 零生命周期假设——v0.1 实机证明闭源 Swift 类不覆写任何系统生命周期方法，
+// 精确挂钩必须等方法表 dump 出来再定；扫描式先保证透明化必定生效。
+// 只在主队列运行（UIKit 访问安全）；无 VM 窗口时一次空扫 ≈ 一个 windows
+// 数组遍历，代价可忽略。命中日志只记前 3 次，避免刷屏。
+// ===========================================================================
+static void VHPStartSweep(void) {
+    if (gVHPSweep) return;
+    dispatch_queue_t q = dispatch_get_main_queue();
+    gVHPSweep = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+    dispatch_source_set_timer(gVHPSweep, DISPATCH_TIME_NOW,
+                              (uint64_t)(0.3 * NSEC_PER_SEC), 0);
+    dispatch_source_set_event_handler(gVHPSweep, ^{
+        if (!gVHPPatch) return;
+        @try {
+            id app = ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIApplication"),
+                                                     @selector(sharedApplication));
+            if (![app respondsToSelector:@selector(windows)]) return;
+            NSArray *wins = ((NSArray *(*)(id, SEL))objc_msgSend)(app, @selector(windows));
+            BOOL found = NO;
+            for (UIView *w in wins) {
+                NSString *cn = NSStringFromClass([w class]) ?: @"";
+                if ([cn rangeOfString:@"VolumeManagerSBHUD"].location == NSNotFound &&
+                    [cn rangeOfString:@"VMHUD"].location == NSNotFound) continue;
+                found = YES;
+                VHPWalkClear(w);
+            }
+            if (found) {
+                gVHPSweepHits++;
+                if (gVHPSweepHits <= 3) {
+                    VHPLog(@"扫描补丁：命中 VM 窗口并清理（第 %d 次）", gVHPSweepHits);
+                }
+            }
+        } @catch (NSException *e) { }
+    });
+    dispatch_resume(gVHPSweep);
+}
+
+// ===========================================================================
+// 方法表 dump（v0.2）：枚举 HUD 镜像全部类 + 自有实例方法
+// （class_copyMethodList 不含继承——这就是真实可挂表面）。
+// 为下一轮「扫描式 → 精确挂钩」提供依据。
+// ===========================================================================
+static void VHPDumpImageMethods(const char *imgPath) {
+    if (!imgPath) return;
+    @try {
+        unsigned int n = 0;
+        const char **names = objc_copyClassNamesForImage(imgPath, &n);
+        if (!names || n == 0) { if (names) free(names); return; }
+        NSMutableString *rep = [NSMutableString
+            stringWithFormat:@"=== HUD 镜像类与方法表（%u 个类）===\n", n];
+        for (unsigned int i = 0; i < n; i++) {
+            Class c = objc_getClass(names[i]);
+            [rep appendFormat:@"— %s —\n", names[i]];
+            if (!c) { [rep appendString:@"   (类未注册)\n"]; continue; }
+            unsigned int m = 0;
+            Method *ms = class_copyMethodList(c, &m);
+            for (unsigned int j = 0; j < m; j++) {
+                [rep appendFormat:@"   %@\n",
+                    NSStringFromSelector(method_getName(ms[j]))];
+            }
+            if (ms) free(ms);
+            if (m == 0) [rep appendString:@"   (无自有实例方法)\n"];
+        }
+        free(names);
+        VHPLog(@"%@", rep);
+    } @catch (NSException *e) {
+        VHPLog(@"方法表 dump 异常: %@", e);
+    }
+}
+
+// ===========================================================================
+// 钩子实现（orig 先行，后处理）——命中即精确补丁；未命中由扫描式兜底
 // ===========================================================================
 static void VHPVCAppearHook(id self, SEL _cmd, BOOL animated) {
     if (gOrigVCAppear) ((void (*)(id, SEL, BOOL))gOrigVCAppear)(self, _cmd, animated);
+    if (gVHPPatch) VHPPatchHUD(self);
+    if (gVHPDump)  VHPDumpOnce(self);
+}
+static void VHPVCAppearWHook(id self, SEL _cmd, BOOL animated) {
+    if (gOrigVCAppearW) ((void (*)(id, SEL, BOOL))gOrigVCAppearW)(self, _cmd, animated);
     if (gVHPPatch) VHPPatchHUD(self);
     if (gVHPDump)  VHPDumpOnce(self);
 }
@@ -202,10 +287,16 @@ static void VHPViewMoveHook(id self, SEL _cmd) {
     if (gVHPPatch) VHPPatchHUD(self);
     if (gVHPDump)  VHPDumpOnce(self);
 }
+static void VHPViewLayoutHook(id self, SEL _cmd) {
+    if (gOrigViewLayout) ((void (*)(id, SEL))gOrigViewLayout)(self, _cmd);
+    if (gVHPPatch) VHPPatchHUD(self);
+    if (gVHPDump)  VHPDumpOnce(self);
+}
 
-// 对已加载的 HUD 类装挂钩。挂点优先级：
-//   VMViewController.viewDidAppear:（窗口已挂、层次最全）
-//   → VMViewController.viewDidLoad → VMHUDView.didMoveToWindow
+// 对已加载的 HUD 类装挂钩（防误伤守卫过滤后按优先级取第一个命中的）。
+// 挂点候选：VMViewController.viewDidAppear:/viewWillAppear:/viewDidLoad、
+//           VMHUDView.didMoveToWindow/layoutSubviews。
+// v0.1 实机：全部被守卫拒绝（Swift 类未覆写）——保留尝试，命中则精确生效。
 static void VHPAttach(void) {
     if (gAttached) return;
     Class vc   = objc_getClass("_TtC18VolumeManagerSBHUD16VMViewController");
@@ -215,6 +306,9 @@ static void VHPAttach(void) {
         IMP o = VHPSwizzle(vc, @selector(viewDidAppear:), (IMP)&VHPVCAppearHook);
         if (o) { gOrigVCAppear = o; gAttached = 1;
                  VHPLog(@"已挂 VMViewController viewDidAppear:"); return; }
+        o = VHPSwizzle(vc, @selector(viewWillAppear:), (IMP)&VHPVCAppearWHook);
+        if (o) { gOrigVCAppearW = o; gAttached = 1;
+                 VHPLog(@"已挂 VMViewController viewWillAppear:"); return; }
         o = VHPSwizzle(vc, @selector(viewDidLoad), (IMP)&VHPVCLoadHook);
         if (o) { gOrigVCLoad = o; gAttached = 1;
                  VHPLog(@"已挂 VMViewController viewDidLoad"); return; }
@@ -223,16 +317,20 @@ static void VHPAttach(void) {
         IMP o = VHPSwizzle(view, @selector(didMoveToWindow), (IMP)&VHPViewMoveHook);
         if (o) { gOrigViewMove = o; gAttached = 1;
                  VHPLog(@"已挂 VMHUDView didMoveToWindow"); return; }
+        o = VHPSwizzle(view, @selector(layoutSubviews), (IMP)&VHPViewLayoutHook);
+        if (o) { gOrigViewLayout = o; gAttached = 1;
+                 VHPLog(@"已挂 VMHUDView layoutSubviews"); return; }
     }
-    VHPLog(@"HUD 类已加载但没有可挂方法（需换挂点）");
+    VHPLog(@"HUD 类已加载但无可挂生命周期方法（扫描式补丁接管，方法表 dump 可定精确挂点）");
 }
 
-// dyld 镜像回调（C 函数指针）：HUD 镜像一出现即装
+// dyld 镜像回调（C 函数指针）：HUD 镜像一出现即装 + 方法表 dump
 static void VHPImageAdded(const struct mach_header *mh, intptr_t slide) {
     Dl_info info;
     if (dladdr((const void *)mh, &info) && info.dli_fname &&
         strstr(info.dli_fname, "/VolumeManagerSBHUD.dylib")) {
         VHPAttach();
+        if (gVHPDump) VHPDumpImageMethods(info.dli_fname);
     }
 }
 
@@ -265,9 +363,14 @@ static void VHPInstall(void) {
         gVHPDump  = VHPFilePresent(@"vmaq-hud-debug");
         if (VHPFilePresent(@"vmaq-hud-opaque")) gVHPPatch = 0;
 
-        VHPLog(@"注入 pid=%d 透明补丁=%d dump探针=%d",
+        VHPLog(@"注入 pid=%d 透明补丁=%d dump探针=%d（补丁=扫描式0.3s）",
                (int)[[NSProcessInfo processInfo] processIdentifier],
                gVHPPatch, gVHPDump);
+
+        if (gVHPPatch) {
+            // 扫描式补丁进主队列启动（UIKit 访问必须在主线程）
+            dispatch_async(dispatch_get_main_queue(), ^{ VHPStartSweep(); });
+        }
         VHPInstall();
     }
 }
