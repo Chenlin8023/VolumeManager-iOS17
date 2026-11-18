@@ -65,15 +65,27 @@
     VMPDiagLog(@"root viewWillAppear: reloadData 前");
     [_vmpTable reloadData];
     VMPDiagLog(@"root viewWillAppear: reloadData 后");
-    // 心跳：判明卡死时主 runloop 是否存活（活着=渲染层问题；停跳=主线程阻塞）
+    // ── 挂起采栈守卫（v4.4）────────────────────────────────────────────
+    // 实测：viewWillAppear 返回后 1s 内主 runloop 被阻塞（1s 心跳从未触发），
+    // 且 hang 报告的 stackshot 两次都截断主线程栈 → 卡点不可见。
+    // 手段：主队列 1s 心跳置位；后台线程 3.5s 后检查——若心跳未触发（确认
+    // 主线程阻塞）→ abort() 主动崩溃 → 系统 crash 报告必含全部线程栈，
+    // 卡死的转圈位置从此可见。本构建为诊断构建。
+    static volatile int gRootHeartbeat = 0;
+    gRootHeartbeat = 0;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        gRootHeartbeat = 1;
         VMPDiagLog(@"root 心跳 1s：主 runloop 存活");
     });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         VMPDiagLog(@"root 心跳 3s：主 runloop 存活");
     });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        VMPDiagLog(@"root 心跳 6s：主 runloop 存活");
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+        [NSThread sleepForTimeInterval:3.5];
+        if (!gRootHeartbeat) {
+            VMPDiagLog(@"!!! 3.5s 心跳未触发 → 主线程确认阻塞 → abort 采主线程栈");
+            abort();
+        }
     });
 }
 
