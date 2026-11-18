@@ -75,6 +75,25 @@ else
     echo "        期望位置：$DIR_JB/volumeInfo.plist"
 fi
 
+# ── 白名单（v2.0）：同步兜底副本（沙箱 App 读不到 jbroot 数据目录） ──────
+# 引擎查找顺序 = 三数据目录 → 本副本；文件缺失时引擎按兼容模式运行（v1.3.4 行为）。
+WL_SYNCED=/var/mobile/Library/Preferences/com.local.volmanaudioqueue.appwhitelist.plist
+WL_SRC=""
+for c in "$DIR_JB/appwhitelist.plist" \
+         "$DIR_PLAIN/appwhitelist.plist" \
+         "$DIR_JBROOT/appwhitelist.plist" ; do
+    if [ -f "$c" ]; then WL_SRC="$c"; break; fi
+done
+if [ -n "$WL_SRC" ]; then
+    cp -f "$WL_SRC" "$WL_SYNCED" 2>/dev/null
+    chown mobile:mobile "$WL_SYNCED" 2>/dev/null
+    chmod 644 "$WL_SYNCED" 2>/dev/null
+    echo "白名单已找到 → $WL_SRC"
+    echo "  已同步副本 → $WL_SYNCED"
+else
+    echo "提示 — 尚无 appwhitelist.plist（白名单未初始化，引擎按兼容模式运行）。"
+fi
+
 # ── 调试旁路样例（默认不启用） ──────────────────────────────────────────
 S="$DIR_JB/vmaq-force.txt.sample"
 if [ ! -f "$S" ]; then

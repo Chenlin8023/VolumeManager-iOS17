@@ -1,6 +1,17 @@
 /*
- * VolManAudioQueue v1.3.4 —— VolumeManager「每 App 音量」模块重写版
+ * VolManAudioQueue v2.0.0 —— VolumeManager「每 App 音量」模块重写版（音量管理器）
  * ============================================================================
+ * v2.0.0  新增「应用白名单」（docs/05 大版本设计 §四.1）：引擎 ctor 读
+ *         appwhitelist.plist {version, mode:"whitelist", enabled:[bundleId…]}
+ *         做一次性裁决——名单内装音量+混音挂钩；名单外全不装（含混音层）；
+ *         文件缺失=兼容模式（v1.3.4 行为：配置存在就装），老用户升级后、
+ *         首次扫描前绝不回退；文件存在但读不出 enabled 数组=按空名单
+ *         fail-closed（宁可暂不注入，也不悄悄变回全进程注入）。
+ *         白名单是进程启动时的一次性裁决：改名单重启 App 生效；音量值仍走
+ *         0.5s 轮询热刷新（两种语义不同，日志里写明）。查找=三数据目录 +
+ *         Preferences 同步副本（沙箱 App 兜底，postinst/面板同步）。
+ *         调试旁路 vmaq-force 优先级仍高于白名单（排障通道不受名单约束）。
+ *         （HUD 透明补丁与自写面板是 v2.0 后续步骤，见 docs/05 §七。）
  * v1.3.4  转正版：RC探针节流——v1.3.3 的 5s 无条件输出改为 30s 且
  *         计数有变化才输出（无条件 5s 在听书场景 ≈720 行/h，会把
  *         256KB 日志轮转压满；探针本身在 T1/T2 A/B 中已证明价值，
@@ -128,6 +139,12 @@ static NSString *const kVMSyncedCopy = @"/var/mobile/Library/Preferences/com.loc
 
 static NSString *const kVMPrefsPath  = @"/var/mobile/Library/Preferences/com.sunshinesong.volume-manager-prefs.plist";
 static NSString *const kVMEnabledKey = @"isEnabledManagementAppVolume";
+
+// 白名单（v2.0）：与 volumeInfo 同目录的 appwhitelist.plist，运行时按目录候选找
+// （不新增写死前缀）；沙箱 App 读不到数据目录时走 Preferences 同步副本
+// （postinst 安装时同步，v2.0 自写面板落定后由面板双向同步）。
+static NSString *const kVMWhitelistName   = @"appwhitelist.plist";
+static NSString *const kVMWhitelistSynced = @"/var/mobile/Library/Preferences/com.local.volmanaudioqueue.appwhitelist.plist";
 
 // 原版 AudioQueue 模块监听的就是这三个（前两个是重点）：
 //   settingOnChanged  ← 设置面板调完音量后 POST
@@ -591,6 +608,81 @@ static float VMReadForceFile(void) {
     } @catch (NSException *e) {
         return -1.0f;
     }
+}
+
+// ===========================================================================
+// 白名单裁决（v2.0，docs/05 §四.1）
+//   appwhitelist.plist = { version:1, mode:"whitelist", enabled:[bundleId…] }
+//   · 只认 enabled 数组，mode 仅作标记。
+//   · 文件缺失 = 兼容模式（v1.3.4 行为：配置存在就装）——老用户升级后、
+//     首次扫描生成名单前，行为绝不回退。
+//   · 文件存在但不可解析 / 没有 enabled 数组 = 按空名单（fail-closed）：
+//     宁可暂时不注入，也不能悄悄变回「全进程注入」。
+//   · 这是进程启动时的一次性裁决；改名单后重启 App 生效（音量值仍走
+//     0.5s 轮询热刷新，两种语义不同）。
+//   · 查找顺序：三数据目录 → Preferences 同步副本（沙箱 App 兜底）。
+//     文件存在与否用 fileExistsAtPath 单独判定，避免「存在但损坏」被误判
+//     成「不存在」而滑进兼容模式。
+// ===========================================================================
+typedef NS_ENUM(int, VMWhitelistVerdict) {
+    VMWhitelistLegacy = 0,   // 无文件 → 兼容模式
+    VMWhitelistIn     = 1,   // 名单内 → 正常安装（音量 + 混音）
+    VMWhitelistOut    = 2,   // 名单外/空名单 → 全不装（含混音层）
+};
+
+static VMWhitelistVerdict VMWhitelistDecide(NSString *bid,
+                                            NSString **outFile,
+                                            NSString **outReason) {
+    if (outFile)   *outFile = nil;
+    if (outReason) *outReason = @"";
+    if (bid.length == 0) {
+        if (outReason) *outReason = @"无 bundle id";
+        return VMWhitelistLegacy;
+    }
+
+    NSMutableArray<NSString *> *cands = [NSMutableArray array];
+    for (NSString *d in VMDirs()) {
+        [cands addObject:[d stringByAppendingPathComponent:kVMWhitelistName]];
+    }
+    [cands addObject:kVMWhitelistSynced];
+
+    NSDictionary *root = nil;
+    NSString *hit = nil;
+    NSString *firstExisting = nil;
+    BOOL existsAnywhere = NO;
+    for (NSString *p in cands) {
+        if (![[NSFileManager defaultManager] fileExistsAtPath:p]) continue;
+        existsAnywhere = YES;
+        if (!firstExisting) firstExisting = p;
+        NSDictionary *r = [NSDictionary dictionaryWithContentsOfFile:p];
+        if ([r isKindOfClass:[NSDictionary class]] && r.count > 0) { root = r; hit = p; break; }
+    }
+
+    if (!root) {
+        if (existsAnywhere) {
+            if (outFile) *outFile = firstExisting;
+            if (outReason) *outReason = [NSString stringWithFormat:
+                @"白名单文件存在但不可解析（%@）→ 按空名单（fail-closed）。"
+                @"引擎只认 plist 格式（XML/二进制属性列表），JSON 文本 NSDictionary 解析不了",
+                firstExisting];
+            return VMWhitelistOut;
+        }
+        if (outReason) *outReason = @"白名单未初始化（无 appwhitelist.plist）→ 兼容模式";
+        return VMWhitelistLegacy;
+    }
+    if (outFile) *outFile = hit;
+
+    id en = root[@"enabled"];
+    if (![en isKindOfClass:[NSArray class]]) {
+        if (outReason) *outReason = @"白名单文件存在但无 enabled 数组 → 按空名单（fail-closed）";
+        return VMWhitelistOut;
+    }
+    if ([en containsObject:bid]) {
+        if (outReason) *outReason = @"白名单命中";
+        return VMWhitelistIn;
+    }
+    if (outReason) *outReason = @"白名单未收录";
+    return VMWhitelistOut;
 }
 
 static void VMDumpConfigOnce(NSDictionary *root) {
@@ -1696,8 +1788,22 @@ static void VMStartEngine(void) {
 
             float forced = VMReadForceFile();
 
-            VMLog(@"=== v1.3.4 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f",
-                  bid, enabled, skip, isExt, gVMAQDebug, (double)forced);
+            // ② 白名单裁决（v2.0，docs/05 §四.1）：进程启动时一次性决定装/不装
+            //    （音量 + 混音一起管）。改名单后重启 App 生效；音量值仍走 0.5s
+            //    轮询热刷新。调试旁路 vmaq-force 优先级高于白名单（排障通道
+            //    不受名单约束）。
+            VMWhitelistVerdict wl = VMWhitelistLegacy;
+            NSString *wlFile = nil;
+            NSString *wlReason = @"";
+            if (!skip) wl = VMWhitelistDecide(bid, &wlFile, &wlReason);
+            BOOL forcedActive = (forced >= 0.0f && forced <= 1.0f);
+            BOOL wlAllow = (wl != VMWhitelistOut) || forcedActive;
+
+            VMLog(@"=== v2.0.0 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f 白名单=%d",
+                  bid, enabled, skip, isExt, gVMAQDebug, (double)forced, wl);
+            if (!skip) {
+                VMLog(@"白名单：%@ | %@", wlFile ?: @"(未初始化)", wlReason);
+            }
 
             // ① 全量路径探测（一次性，把真相写进日志）
             if (!skip) VMProbePaths();
@@ -1721,10 +1827,12 @@ static void VMStartEngine(void) {
                 }
             }
 
-            // ②′ 混音策略层：与音量配置完全解耦，无条件安装。
-            //     必须无条件 —— 只要有一个参与播放的 App 不是混音的，
-            //     它一激活就会把别人掐掉，表现为「有时能同时播、有时不能」。
-            if (!skip) {
+            // ②′ 混音策略层：v2.0 起随白名单收窄（docs/05 §二 Q5）——「不注入」
+            //     语义优先于「无条件混音」：名单外 App 连混音 hook 也不装。
+            //     白名单内 / 兼容模式（名单未初始化）仍照旧安装，保证多 App 同播。
+            //     副作用（已接受）：名单外 App 激活音频时可能打断白名单 App 的
+            //     同播——那是 iOS 原生行为，插件不再越权干预。
+            if (!skip && wlAllow) {
                 VMMixLoadConfig(bid);
                 VMMixInstallHooks();
             }
@@ -1740,10 +1848,13 @@ static void VMStartEngine(void) {
                                  : isExt ? @"扩展进程(Widget/PluginKitPlugin)不出声"
                                          : @"无 bundle id")
                               : @"总开关关闭";
-            } else if (forced >= 0.0f && forced <= 1.0f) {
+            } else if (forcedActive) {
                 gVolume = forced;
                 install = YES;
                 reason = [NSString stringWithFormat:@"调试旁路(配置系数=%.4f)", (double)cfgFactor];
+            } else if (wl == VMWhitelistOut) {
+                gVolume = 1.0f;
+                reason = [NSString stringWithFormat:@"白名单不通过：%@", wlReason];
             } else if (!cfgPath) {
                 gVolume = 1.0f;
                 reason = @"配置缺失（所有候选路径都读不到）";
