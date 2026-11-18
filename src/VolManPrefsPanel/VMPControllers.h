@@ -1,58 +1,31 @@
 /*
- * VMPControllers.h —— 三个控制器的前置声明（CI 头适配：基类不暴露
- * specifiers ivar，各自声明；跨文件 push 引用需要完整 @interface）。
+ * VMPControllers.h —— v3 架构（2026-11-19）：弃用 PSListController。
+ *
+ * 三轮实机证据：PS 的 plain-init 创建路径 ✓、类层级 ✓、KVC 直写 _specifiers ✓、
+ * setSpecifiers ✓、reloadSpecifiers ✓、plist 加载截流（从未被走到）——全部到位
+ * 表格仍然空。iOS 17 PSListController 内部加载流对我们不可见，继续考古成本失控。
+ *
+ * 改为纯 UITableViewController 自绘（Settings 导航栈接受任意 UIViewController）：
+ *   · 业务逻辑层 VMPShared 一行不动（扫描/读写/通知）
+ *   · 开关 = UISwitch（UIAction，iOS 14+），滑杆 = UISlider
+ *   · 图标/名称/页脚 = 标准 UITableViewCell
+ *   · 创建路径不变：NSPrincipalClass → plain init（已实锤）
  */
 #import "VMPShared.h"
-#import <Preferences/PSListController.h>
-#import <Preferences/PSSpecifier.h>
 #import <objc/message.h>
 
-// CI 头兼容：基类 plist 加载器声明（运行时存在；头版本差异由 category 补声明）。
-// 三个控制器的加载截流覆写依赖这两个声明。
-@interface PSListController (VMPCompat)
-- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target;
-- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target bundle:(NSBundle *)bundle;
+@interface VMPRootListController : UITableViewController
 @end
 
-// 共用同步原语：把 specifiers 写进基类 ivar（KVC）+ 属性 setter + 表格刷新。
-// 不调用基类 reloadSpecifiers——它从 plist 源重派生，会覆盖我们塞的数组
-// （2026-11-19 实机证据：构建 6 项 + setSpecifiers 同步 6 项后表格仍空）。
-static inline void VMPBaseSync(id self, NSString *tag) {
-    NSArray *specs = nil;
-    @try { specs = [self performSelector:@selector(specifiers)]; } @catch (NSException *e) { }
-    if (!specs) return;
-    @try { [self setValue:specs forKey:@"_specifiers"]; } @catch (NSException *e) {
-        VMPDiagLog(@"[%@] KVC _specifiers 失败: %@", tag, e);
-    }
-    if ([self respondsToSelector:@selector(setSpecifiers:)]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(self, @selector(setSpecifiers:), specs);
-    }
-    UITableView *tv = nil;
-    @try { tv = [self valueForKey:@"table"]; } @catch (NSException *e) { }
-    if (![tv isKindOfClass:[UITableView class]]) {
-        @try { tv = (UITableView *)((id (*)(id, SEL))objc_msgSend)(self, @selector(view)); } @catch (NSException *e) { }
-    }
-    if ([tv isKindOfClass:[UITableView class]]) [tv reloadData];
-    VMPDiagLog(@"[%@] base sync %lu 项（KVC+setter+tableReload）", tag, (unsigned long)specs.count);
-}
-
-@interface VMPRootListController : PSListController {
-    NSArray *_vmpSpecifiers;
-}
-@end
-
-@interface VMPWhitelistController : PSListController {
-    NSArray *_vmpSpecifiers;
-}
+@interface VMPWhitelistController : UITableViewController
 @property (nonatomic, strong) NSArray<VMPAppEntry *> *apps;
 @property (nonatomic, strong) NSMutableArray<NSString *> *enabled;
 @property (nonatomic, assign) BOOL scanned;
 @property (nonatomic, assign) BOOL seeding;
 @end
 
-@interface VMPVolumeController : PSListController {
-    NSArray *_vmpSpecifiers;
-}
+@interface VMPVolumeController : UITableViewController
 @property (nonatomic, copy) NSString *bid;
 @property (nonatomic, copy) NSString *appName;
+@property (nonatomic, assign) double volumePercent;
 @end

@@ -16,7 +16,6 @@ BUNDLE_NAME = VolManPrefsPanel
 
 VolManPrefsPanel_FILES = VMPShared.m VMPRootListController.m VMPWhitelistController.m VMPVolumeController.m
 VolManPrefsPanel_FRAMEWORKS = Foundation UIKit
-VolManPrefsPanel_PRIVATE_FRAMEWORKS = Preferences
 VolManPrefsPanel_INSTALL_PATH = /Library/PreferenceBundles
 VolManPrefsPanel_CFLAGS = -fobjc-arc -Wall -Wno-unused-function
 
