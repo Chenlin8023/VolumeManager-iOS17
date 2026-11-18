@@ -84,18 +84,22 @@
     VMPMixEnabledWrite([value boolValue]);
 }
 
+// 加载截流：基类无论何时用哪个 plist 名加载，都返回我们构建的数组
+// （真因=基类 reloadSpecifiers/加载流程从 plist 源重派生，plist 缺失→空，
+//  会覆盖我们 set 进去的数组；2026-11-19 实机证据链）
+- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target bundle:(NSBundle *)bundle {
+    VMPDiagLog(@"root: plist 加载截流（%@）→ 自建数组", name ?: @"(nil)");
+    return [[self specifiers] mutableCopy];
+}
+- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target {
+    VMPDiagLog(@"root: plist 加载截流(无bundle)（%@）→ 自建数组", name ?: @"(nil)");
+    return [[self specifiers] mutableCopy];
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"音量管理器";
-    // 空表修复（2026-11-19）：基类的加载流程可能直接读自身 ivar（不走我们的
-    // getter 覆写，或走 plist 加载且 plist 不存在 → 空表）。构建后把数组同步
-    // 进基类属性（setSpecifiers:）并 reloadSpecifiers，覆盖两种基类实现。
-    NSArray *specs = [self specifiers];
-    if ([self respondsToSelector:@selector(setSpecifiers:)]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(self, @selector(setSpecifiers:), specs);
-        VMPDiagLog(@"root: 基类属性已同步 %lu 项", (unsigned long)specs.count);
-    }
-    [self reloadSpecifiers];
+    VMPBaseSync(self, @"root-viewDidLoad");
 }
 
 @end

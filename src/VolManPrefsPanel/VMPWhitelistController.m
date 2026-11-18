@@ -29,7 +29,7 @@
                     || [fm fileExistsAtPath:VMPWhitelistSyncedPath()];
     self.seeding = !fileExisted;
 
-    // 空表修复：占位数组同步进基类属性（同根页注释）
+    // 占位数组同步进基类（截流版见 vmpSyncToBase）
     [self vmpSyncToBase];
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -41,13 +41,18 @@
     });
 }
 
-// 把 _vmpSpecifiers 同步进基类属性并 reload（基类可能直读自身 ivar，不走 getter 覆写）
+// 把 _vmpSpecifiers 写进基类 ivar（KVC）+ setter + 表格刷新；
+// 不调用基类 reloadSpecifiers（plist 重派生会覆盖，见 VMPControllers.h 注释）
 - (void)vmpSyncToBase {
-    NSArray *specs = [self specifiers];
-    if ([self respondsToSelector:@selector(setSpecifiers:)]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(self, @selector(setSpecifiers:), specs);
-    }
-    [self reloadSpecifiers];
+    VMPBaseSync(self, @"whitelist-sync");
+}
+
+// 加载截流（同根页）：扫描完成后基类任何重载都拿我们的最新数组
+- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target bundle:(NSBundle *)bundle {
+    return [[self specifiers] mutableCopy];
+}
+- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target {
+    return [[self specifiers] mutableCopy];
 }
 
 - (NSMutableArray<NSString *> *)currentEnabled {

@@ -52,13 +52,17 @@
     return _vmpSpecifiers;
 }
 
+// 加载截流（同根页）
+- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target bundle:(NSBundle *)bundle {
+    return [[self specifiers] mutableCopy];
+}
+- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target {
+    return [[self specifiers] mutableCopy];
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
-    NSArray *specs = [self specifiers];
-    if ([self respondsToSelector:@selector(setSpecifiers:)]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(self, @selector(setSpecifiers:), specs);
-    }
-    [self reloadSpecifiers];
+    VMPBaseSync(self, @"volume-viewDidLoad");
 }
 
 - (id)volumeForSpecifier:(PSSpecifier *)spec {
