@@ -9,6 +9,12 @@
 
 @implementation VMPWhitelistController
 
+// PS 契约：无设防 initWithSpecifier:（见根页注释）——白名单页无上下文，安全链即可
+- (instancetype)initWithSpecifier:(PSSpecifier *)specifier {
+    if ((self = [super init])) { }
+    return self;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     if (self.scanned) return;

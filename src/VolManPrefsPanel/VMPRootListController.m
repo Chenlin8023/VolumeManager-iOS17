@@ -10,6 +10,14 @@
 
 @implementation VMPRootListController
 
+// PS 契约：推 detail 时 controllerForSpecifier: 会无设防调用 initWithSpecifier:
+// （实机崩溃实锤 2026-11-18）——基类头未声明该 selector，子类自带实现走
+// [super init] 安全链（根页无上下文，空实现即可）。
+- (instancetype)initWithSpecifier:(PSSpecifier *)specifier {
+    if ((self = [super init])) { }
+    return self;
+}
+
 - (NSArray *)specifiers {
     if (!_vmpSpecifiers) {
         PSSpecifier *g1 = [PSSpecifier groupSpecifierWithName:@"音量管理"];
@@ -27,7 +35,7 @@
             get:@selector(mixValueForSpecifier:)
             detail:nil cell:PSSwitchCell edit:nil];
         [mix setIdentifier:@"mix"];
-        PSSpecifier *mixFoot = [PSSpecifier groupSpecifierWithName:nil];
+        PSSpecifier *mixFoot = [PSSpecifier groupSpecifierWithName:@" "];
         [mixFoot setProperty:@"混音开关在应用下次启动时生效（引擎启动时读取）。"
                   forKey:@"footerText"];
 
