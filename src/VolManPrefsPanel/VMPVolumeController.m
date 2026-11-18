@@ -30,8 +30,11 @@
 - (void)loadView {
     UITableView *tv = [[UITableView alloc] initWithFrame:CGRectZero
                                                    style:UITableViewStyleInsetGrouped];
-    tv.dataSource = self;
-    tv.delegate = self;
+    VMPTableMediator *med = [VMPTableMediator new];
+    med.owner = self;
+    tv.dataSource = med;
+    tv.delegate = med;
+
     tv.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.view = tv;
     _vmpTable = tv;
@@ -51,21 +54,21 @@
 
 #pragma mark - 数据
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+- (NSInteger)vmp_numberOfSections {
     return 1;
 }
 
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+- (NSInteger)vmp_numberOfRowsInSection:(NSInteger)section {
     return 1;
 }
 
-- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+- (NSString *)vmp_titleForFooter:(NSInteger)section {
     return @"拖动即时生效（松手落盘），引擎 0.5s 轮询兜底；0 = 静音。";
 }
 
 #pragma mark - 行
 
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+- (UITableViewCell *)vmp_cellForIndexPath:(NSIndexPath *)indexPath {
     static NSString *id = @"vmpSliderRow";
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:id];
     if (!cell) {

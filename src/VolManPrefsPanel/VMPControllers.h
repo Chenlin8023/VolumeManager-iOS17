@@ -16,6 +16,27 @@
 #import <Preferences/PSSpecifier.h>
 #import <objc/message.h>
 
+// ── 自绘表中介（v4.1，2026-11-19）─────────────────────────────────────────
+// 铁证：自绘表 delegate=self（PSListController 子类）时，PSListController 自己
+// 实现的 UITableViewDelegate 方法（iOS 17 的 titleAlignmentForHeaderInSection
+// 等）会读它内部 specifiers 数组（空）→ NSRangeException。
+// 中介 = 纯 NSObject 实现完整协议面，转发到控制器的 vmp_* 前缀方法
+// （PS 永不实现这些名字）→ delegate 回调彻底脱离 PS 实现。
+@protocol VMPTableSource <NSObject>
+@required
+- (NSInteger)vmp_numberOfSections;
+- (NSInteger)vmp_numberOfRowsInSection:(NSInteger)section;
+- (UITableViewCell *)vmp_cellForIndexPath:(NSIndexPath *)indexPath;
+@optional
+- (NSString *)vmp_titleForHeader:(NSInteger)section;
+- (NSString *)vmp_titleForFooter:(NSInteger)section;
+- (void)vmp_didSelectRowAtIndexPath:(NSIndexPath *)indexPath;
+@end
+
+@interface VMPTableMediator : NSObject <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, weak) id<VMPTableSource> owner;
+@end
+
 @interface VMPRootListController : PSListController {
     UITableView *_vmpTable;
 }

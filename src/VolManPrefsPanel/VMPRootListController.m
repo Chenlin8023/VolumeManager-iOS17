@@ -28,8 +28,11 @@
 - (void)loadView {
     UITableView *tv = [[UITableView alloc] initWithFrame:CGRectZero
                                                    style:UITableViewStyleInsetGrouped];
-    tv.dataSource = self;
-    tv.delegate = self;
+    VMPTableMediator *med = [VMPTableMediator new];
+    med.owner = self;
+    tv.dataSource = med;
+    tv.delegate = med;
+
     tv.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.view = tv;
     _vmpTable = tv;
@@ -55,22 +58,22 @@
 
 #pragma mark - 数据
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+- (NSInteger)vmp_numberOfSections {
     return 2;
 }
 
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+- (NSInteger)vmp_numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return 2;
     return 1;
 }
 
-- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+- (NSString *)vmp_titleForFooter:(NSInteger)section {
     return section == 0
         ? @"总开关关闭时，所有应用的音量调整与混音全部停止。混音开关在应用下次启动时生效。"
         : @"勾选 = 引擎对该应用装载音量挂钩与混音；不勾 = 完全不注入。";
 }
 
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+- (NSString *)vmp_titleForHeader:(NSInteger)section {
     return section == 0 ? @"音量管理" : @"应用";
 }
 
@@ -128,14 +131,14 @@
     VMPMixEnabledWrite(sw.on);
 }
 
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+- (UITableViewCell *)vmp_cellForIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 0) {
         return indexPath.row == 0 ? [self masterCell:tableView] : [self mixCell:tableView];
     }
     return [self whitelistCell:tableView];
 }
 
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+- (void)vmp_didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.section == 1 && indexPath.row == 0) {
         VMPWhitelistController *c = [VMPWhitelistController new];

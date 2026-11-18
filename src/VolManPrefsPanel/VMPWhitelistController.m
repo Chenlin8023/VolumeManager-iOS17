@@ -27,8 +27,11 @@
 - (void)loadView {
     UITableView *tv = [[UITableView alloc] initWithFrame:CGRectZero
                                                    style:UITableViewStyleInsetGrouped];
-    tv.dataSource = self;
-    tv.delegate = self;
+    VMPTableMediator *med = [VMPTableMediator new];
+    med.owner = self;
+    tv.dataSource = med;
+    tv.delegate = med;
+
     tv.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.view = tv;
     _vmpTable = tv;
@@ -100,16 +103,16 @@
 
 #pragma mark - 数据
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+- (NSInteger)vmp_numberOfSections {
     return 2;
 }
 
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+- (NSInteger)vmp_numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return MAX(1, (NSInteger)self.apps.count);
     return MAX(1, (NSInteger)[self enabledApps].count);
 }
 
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+- (NSString *)vmp_titleForHeader:(NSInteger)section {
     if (section == 0) {
         if (!VMPMasterEnabledRead()) return @"应用白名单（⚠ 总开关已关闭，白名单不生效）";
         return @"应用白名单";
@@ -117,7 +120,7 @@
     return @"音量调节";
 }
 
-- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+- (NSString *)vmp_titleForFooter:(NSInteger)section {
     if (section == 0) {
         return @"勾选 = 引擎对该应用装载音量挂钩与混音；不勾 = 完全不注入。"
                @"系统应用默认不勾选。改动需重启对应应用生效。";
@@ -175,7 +178,7 @@
     return cell;
 }
 
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+- (UITableViewCell *)vmp_cellForIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 0) {
         return [self appCell:tableView row:indexPath.row];
     }
@@ -199,7 +202,7 @@
     [_vmpTable reloadSections:sec withRowAnimation:UITableViewRowAnimationNone];
 }
 
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+- (void)vmp_didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.section != 1) return;
     NSArray<VMPAppEntry *> *enabledApps = [self enabledApps];
