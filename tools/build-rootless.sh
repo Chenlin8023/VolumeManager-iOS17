@@ -66,6 +66,21 @@ build_one() {
   chmod 755 "$DL/VolManPrefsClean.dylib"
   chmod 644 "$DL/VolManPrefsClean.plist"
 
+  # HUD 透明补丁模块（v2.0 步骤②；CI FAT 产物，人工下载放 hudpatch-prebuilt）
+  # 缺席不阻塞构建：full 包照常出，透明补丁功能不进包（docs/05 §四.2）。
+  if [ "$kind" = "full" ]; then
+    HUDPRE="$REPO/tools/hudpatch-prebuilt"
+    if [ -f "$HUDPRE/VolManHUDPatch.dylib" ] && [ -f "$HUDPRE/VolManHUDPatch.plist" ]; then
+      cp -a "$HUDPRE/VolManHUDPatch.dylib" "$DL/VolManHUDPatch.dylib"
+      cp -a "$HUDPRE/VolManHUDPatch.plist" "$DL/VolManHUDPatch.plist"
+      chmod 755 "$DL/VolManHUDPatch.dylib"
+      chmod 644 "$DL/VolManHUDPatch.plist"
+      python3 "$REPO/tools/dylib_archs.py" "$DL/VolManHUDPatch.dylib"
+    else
+      echo "提示 — hudpatch-prebuilt 缺 VolManHUDPatch（跳过；HUD 透明补丁不进包）"
+    fi
+  fi
+
   cd "$DST"
   rm -f packages/*.deb 2>/dev/null || true
   make clean >/dev/null 2>&1 || true
@@ -79,7 +94,9 @@ build_one() {
   echo "--- 架构核验（必须只有 arm64）---"
   rm -rf "$DST/check" && mkdir -p "$DST/check"
   dpkg-deb -x "$deb" "$DST/check"
-  find "$DST/check" -name '*.dylib' -exec sh -c 'echo "$(basename "$1"): $(lipo -archs "$1")"' _ {} \;
+  # 架构核验：引擎 dylib 必须只有 arm64；原版闭源组件（HUD 等 SpringBoard 侧）FAT 属正常。
+  # lipo 在本构建机缺席（not found 被吞 → 检查空转），统一走 tools/dylib_archs.py 魔数判定。
+  find "$DST/check" -name '*.dylib' -exec python3 "$REPO/tools/dylib_archs.py" {} +
   echo ""
 }
 

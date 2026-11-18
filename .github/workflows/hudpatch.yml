@@ -1,0 +1,64 @@
+name: Build VolManHUDPatch (FAT)
+
+# HUD 透明化运行时补丁：必须 FAT（arm64+arm64e）且 Apple 工具链构建
+# （SpringBoard 只加载 arm64e 切片 = 硬规则 3；本地 clang19 过不了 PAC 关 = 硬规则 8）。
+# 产物人工下载 → tools/hudpatch-prebuilt/ → build-rootless.sh 打入 full 包。
+# 参照 Jikan 仓库 build.yml 的 Theos 环境配置。
+
+permissions:
+    contents: write
+
+on:
+    push:
+        branches:
+            - main
+        paths:
+            - "src/VolManHUDPatch/**"
+            - ".github/workflows/hudpatch.yml"
+    workflow_dispatch:
+
+jobs:
+    build:
+        runs-on: macos-latest
+        steps:
+            - uses: actions/checkout@v7
+
+            - name: Set up Theos
+              uses: waruhachi/theos-action@v2.6.3
+              with:
+                  theos-src: "waruhachi/theos"
+                  theos-branch: "main"
+                  sdks-src: "waruhachi/sdks"
+                  sdks-branch: "main"
+
+            - name: Build VolManHUDPatch (arm64 + arm64e)
+              shell: bash
+              run: |
+                  cd src/VolManHUDPatch
+                  make clean FINALPACKAGE=1 ARCHS="arm64 arm64e" >/dev/null 2>&1 || true
+                  make FINALPACKAGE=1 ARCHS="arm64 arm64e"
+
+            - name: Verify FAT slices and exec bit
+              shell: bash
+              run: |
+                  DYLIB=$(find src/VolManHUDPatch/.theos -name 'VolManHUDPatch.dylib' -type f | head -1)
+                  [ -n "$DYLIB" ] || { echo "!! dylib not found"; exit 1; }
+                  lipo -archs "$DYLIB"
+                  # 硬断言：必须同时含 arm64 与 arm64e
+                  lipo -archs "$DYLIB" | grep -qw arm64  || { echo "!! missing arm64";  exit 1; }
+                  lipo -archs "$DYLIB" | grep -qw arm64e || { echo "!! missing arm64e"; exit 1; }
+                  chmod 755 "$DYLIB"
+
+            - name: Collect artifacts
+              shell: bash
+              run: |
+                  mkdir -p artifacts
+                  DYLIB=$(find src/VolManHUDPatch/.theos -name 'VolManHUDPatch.dylib' -type f | head -1)
+                  cp "$DYLIB" artifacts/VolManHUDPatch.dylib
+                  cp src/VolManHUDPatch/VolManHUDPatch.plist artifacts/VolManHUDPatch.plist
+
+            - name: Upload artifact
+              uses: actions/upload-artifact@v7
+              with:
+                  name: volman-hudpatch-fat
+                  path: artifacts/*
