@@ -180,9 +180,9 @@
 
 - (UITableViewCell *)vmp_cellForIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 0) {
-        return [self appCell:tableView row:indexPath.row];
+        return [self appCell:_vmpTable row:indexPath.row];
     }
-    return [self volumeLinkCell:tableView row:indexPath.row];
+    return [self volumeLinkCell:_vmpTable row:indexPath.row];
 }
 
 - (void)injectToggled:(UISwitch *)sw {
@@ -203,7 +203,7 @@
 }
 
 - (void)vmp_didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    [_vmpTable deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.section != 1) return;
     NSArray<VMPAppEntry *> *enabledApps = [self enabledApps];
     if (indexPath.row >= (NSInteger)enabledApps.count) return;

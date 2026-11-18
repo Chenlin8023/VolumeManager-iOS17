@@ -70,7 +70,7 @@
 
 - (UITableViewCell *)vmp_cellForIndexPath:(NSIndexPath *)indexPath {
     static NSString *id = @"vmpSliderRow";
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:id];
+    UITableViewCell *cell = [_vmpTable dequeueReusableCellWithIdentifier:id];
     if (!cell) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1
                                       reuseIdentifier:id];

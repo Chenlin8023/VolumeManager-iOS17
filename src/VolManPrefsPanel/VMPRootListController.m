@@ -133,13 +133,13 @@
 
 - (UITableViewCell *)vmp_cellForIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 0) {
-        return indexPath.row == 0 ? [self masterCell:tableView] : [self mixCell:tableView];
+        return indexPath.row == 0 ? [self masterCell:_vmpTable] : [self mixCell:_vmpTable];
     }
-    return [self whitelistCell:tableView];
+    return [self whitelistCell:_vmpTable];
 }
 
 - (void)vmp_didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    [_vmpTable deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.section == 1 && indexPath.row == 0) {
         VMPWhitelistController *c = [VMPWhitelistController new];
         [self.navigationController pushViewController:c animated:YES];
