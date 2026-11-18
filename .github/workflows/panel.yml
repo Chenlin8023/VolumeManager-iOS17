@@ -1,0 +1,63 @@
+name: Build VolManPrefsPanel (FAT)
+
+# 自写设置面板：由 Preferences（arm64e 系统进程）加载，必须 FAT 双切片
+# 且 Apple 工具链构建（系统进程拒载 arm64 = 2026-11-18 定案；硬规则 8）。
+# 产物人工下载 → tools/panel-prebuilt/ → build-rootless.sh 打入 full 包。
+# 样板复用 hudpatch.yml。
+
+permissions:
+    contents: write
+
+on:
+    push:
+        branches:
+            - main
+        paths:
+            - "src/VolManPrefsPanel/**"
+            - ".github/workflows/panel.yml"
+    workflow_dispatch:
+
+jobs:
+    build:
+        runs-on: macos-latest
+        steps:
+            - uses: actions/checkout@v7
+
+            - name: Set up Theos
+              uses: waruhachi/theos-action@v2.6.3
+              with:
+                  theos-src: "waruhachi/theos"
+                  theos-branch: "main"
+                  sdks-src: "waruhachi/sdks"
+                  sdks-branch: "main"
+
+            - name: Build VolManPrefsPanel (arm64 + arm64e)
+              shell: bash
+              run: |
+                  cd src/VolManPrefsPanel
+                  make clean FINALPACKAGE=1 ARCHS="arm64 arm64e" >/dev/null 2>&1 || true
+                  make FINALPACKAGE=1 ARCHS="arm64 arm64e"
+
+            - name: Verify FAT slices
+              shell: bash
+              run: |
+                  BIN=$(find src/VolManPrefsPanel/.theos -path '*VolManPrefsPanel.bundle/VolManPrefsPanel' -type f | head -1)
+                  [ -n "$BIN" ] || { echo "!! bundle binary not found"; exit 1; }
+                  lipo -archs "$BIN"
+                  lipo -archs "$BIN" | grep -qw arm64  || { echo "!! missing arm64";  exit 1; }
+                  lipo -archs "$BIN" | grep -qw arm64e || { echo "!! missing arm64e"; exit 1; }
+
+            - name: Collect artifacts
+              shell: bash
+              run: |
+                  mkdir -p artifacts
+                  BUNDLE_DIR=$(find src/VolManPrefsPanel/.theos -type d -name 'VolManPrefsPanel.bundle' | head -1)
+                  [ -n "$BUNDLE_DIR" ] || { echo "!! bundle dir not found"; exit 1; }
+                  cp -a "$BUNDLE_DIR" artifacts/VolManPrefsPanel.bundle
+                  # 入口 plist 由本地打包期生成，这里只带 bundle 本体
+
+            - name: Upload artifact
+              uses: actions/upload-artifact@v7
+              with:
+                  name: volman-panel-fat
+                  path: artifacts/*

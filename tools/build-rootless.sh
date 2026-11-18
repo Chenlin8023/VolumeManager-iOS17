@@ -79,6 +79,45 @@ build_one() {
     else
       echo "提示 — hudpatch-prebuilt 缺 VolManHUDPatch（跳过；HUD 透明补丁不进包）"
     fi
+
+    # 自写设置面板（v2.0 步骤③；CI FAT 产物 bundle + 打包期生成 entry）
+    PANELPRE="$REPO/tools/panel-prebuilt"
+    if [ -f "$PANELPRE/VolManPrefsPanel.bundle/VolManPrefsPanel" ]; then
+      PANEL_DST="$DST/layout/Library/PreferenceBundles/VolManPrefsPanel.bundle"
+      mkdir -p "$PANEL_DST"
+      cp -a "$PANELPRE/VolManPrefsPanel.bundle/." "$PANEL_DST/"
+      # 图标沿用闭源面板的
+      cp -f "$DST/orig/var/jb/Library/PreferenceBundles/VolumeManagerPrefs.bundle/icon.png" "$PANEL_DST/icon.png" 2>/dev/null || true
+      # PreferenceLoader 入口（音量管理器）
+      mkdir -p "$DST/layout/Library/PreferenceLoader/Preferences"
+      cat > "$DST/layout/Library/PreferenceLoader/Preferences/VolManPrefsPanel.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>entry</key>
+	<dict>
+		<key>bundle</key>
+		<string>VolManPrefsPanel</string>
+		<key>cell</key>
+		<string>PSLinkCell</string>
+		<key>detail</key>
+		<string>VMPRootListController</string>
+		<key>icon</key>
+		<string>icon.png</string>
+		<key>isController</key>
+		<true/>
+		<key>label</key>
+		<string>音量管理器</string>
+	</dict>
+</dict>
+</plist>
+EOF
+      python3 "$REPO/tools/dylib_archs.py" "$PANEL_DST/VolManPrefsPanel"
+      chmod -R 755 "$PANEL_DST" 2>/dev/null || true
+    else
+      echo "提示 — panel-prebuilt 缺 VolManPrefsPanel.bundle（跳过；自写面板不进包）"
+    fi
   fi
 
   cd "$DST"
