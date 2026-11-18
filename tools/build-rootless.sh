@@ -113,8 +113,11 @@ build_one() {
 </dict>
 </plist>
 EOF
-      # 图标沿用闭源面板的
-      cp -f "$DST/orig/var/jb/Library/PreferenceBundles/VolumeManagerPrefs.bundle/icon.png" "$PANEL_DST/icon.png" 2>/dev/null || true
+      # 图标沿用闭源面板的（三件套：@2x/@3x 缺失会导致入口图标被放大渲染）
+      ICON_SRC="$DST/orig/var/jb/Library/PreferenceBundles/VolumeManagerPrefs.bundle"
+      for ic in icon.png icon@2x.png icon@3x.png; do
+        cp -f "$ICON_SRC/$ic" "$PANEL_DST/$ic" 2>/dev/null || true
+      done
       # PreferenceLoader 入口（音量管理器）
       mkdir -p "$DST/layout/Library/PreferenceLoader/Preferences"
       cat > "$DST/layout/Library/PreferenceLoader/Preferences/VolManPrefsPanel.plist" <<'EOF'

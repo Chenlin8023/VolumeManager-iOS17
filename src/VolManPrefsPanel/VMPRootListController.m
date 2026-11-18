@@ -62,7 +62,25 @@
     VMPDiagLog(@"root viewWillAppear: super 前");
     [super viewWillAppear:animated];
     VMPDiagLog(@"root viewWillAppear: super 后");
+    VMPDiagLog(@"root viewWillAppear: reloadData 前");
     [_vmpTable reloadData];
+    VMPDiagLog(@"root viewWillAppear: reloadData 后");
+    // 心跳：判明卡死时主 runloop 是否存活（活着=渲染层问题；停跳=主线程阻塞）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        VMPDiagLog(@"root 心跳 1s：主 runloop 存活");
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        VMPDiagLog(@"root 心跳 3s：主 runloop 存活");
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        VMPDiagLog(@"root 心跳 6s：主 runloop 存活");
+    });
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    VMPDiagLog(@"root viewDidAppear: 进入");
+    [super viewDidAppear:animated];
+    VMPDiagLog(@"root viewDidAppear: 返回");
 }
 
 #pragma mark - 数据
@@ -140,7 +158,12 @@
     VMPMixEnabledWrite(sw.on);
 }
 
+static int vmp_cellLogs = 0;
 - (UITableViewCell *)vmp_cellForIndexPath:(NSIndexPath *)indexPath {
+    if (vmp_cellLogs < 6) {
+        VMPDiagLog(@"root cellForRow: section=%ld row=%ld", (long)indexPath.section, (long)indexPath.row);
+        vmp_cellLogs++;
+    }
     if (indexPath.section == 0) {
         return indexPath.row == 0 ? [self masterCell:_vmpTable] : [self mixCell:_vmpTable];
     }
