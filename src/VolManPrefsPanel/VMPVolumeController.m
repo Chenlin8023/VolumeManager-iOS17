@@ -8,7 +8,10 @@
 @implementation VMPVolumeController
 
 - (instancetype)initWithSpecifier:(PSSpecifier *)specifier {
-    if ((self = [super initWithSpecifier:specifier])) {
+    // CI 头适配：基类头未声明 initWithSpecifier:（运行时 PS 经 respondsToSelector
+    // 派发到本实现）；基类初始化走 [super init] 安全链——根页证明基类
+    // loadView 不依赖 specifier ivar，纯 init 可用。
+    if ((self = [super init])) {
         self.bid = [[specifier propertyForKey:@"bid"] copy];
         self.appName = [[specifier propertyForKey:@"appName"] copy] ?: self.bid;
     }
@@ -24,6 +27,12 @@
 
 - (NSArray *)specifiers {
     if (!_vmpSpecifiers) {
+        if (!self.bid) {
+            // 兜底：极少数情况下 PS 未走 initWithSpecifier 派发（上下文缺失）
+            PSSpecifier *g = [PSSpecifier groupSpecifierWithName:@"（上下文缺失，请返回重进）"];
+            _vmpSpecifiers = @[ g ];
+            return _vmpSpecifiers;
+        }
         PSSpecifier *g = [PSSpecifier groupSpecifierWithName:self.appName ?: @"音量"];
         [g setProperty:@"拖动即时生效，引擎 0.5s 轮询兜底；0 = 静音。" forKey:@"footerText"];
 

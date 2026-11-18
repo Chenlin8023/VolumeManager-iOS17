@@ -200,7 +200,10 @@ NSArray<VMPAppEntry *> *VMPScanApps(void) {
         Class wsCls = objc_getClass("LSApplicationWorkspace");
         if (!wsCls) return out;
         id ws = ((id (*)(id, SEL))objc_msgSend)((id)wsCls, @selector(defaultWorkspace));
-        NSArray *apps = [ws allInstalledApplications];
+        // CI 头适配：不依赖 id 接收器的隐式 selector 声明，显式运行时调用
+        SEL allSel = @selector(allInstalledApplications);
+        if (![ws respondsToSelector:allSel]) return out;
+        NSArray *apps = ((NSArray *(*)(id, SEL))objc_msgSend)(ws, allSel);
         for (id proxy in apps) {
             NSString *bid = [proxy bundleIdentifier];
             if (!bid.length) continue;
@@ -214,7 +217,6 @@ NSArray<VMPAppEntry *> *VMPScanApps(void) {
             e.hasAudioMode = [modes isKindOfClass:[NSArray class]]
                              && [(NSArray *)modes containsObject:@"audio"];
             [out addObject:e];
-            nameIndex[bid] = e;
         }
         // volumeInfo 已配置标记 + 默认排序（先非系统按名排序，系统应用垫底）
         NSDictionary *vol = VMPVolumeInfoReadMutable();
