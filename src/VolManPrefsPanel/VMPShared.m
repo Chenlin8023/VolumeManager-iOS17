@@ -168,16 +168,58 @@ void VMPDiagLog(NSString *fmt, ...) {
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
     NSLog(@"[VMP] %@", msg);
+    NSString *line = [NSString stringWithFormat:@"[%@] %@",
+        [NSDate date], msg];
+    // 四通道：jbroot 文件 / /tmp 镜像 / Settings 自有 defaults 域（cfprefsd
+    // 通道沙箱必通）/ NSLog。任何一路静默失败都不影响其他路。
     @try {
         FILE *fp = fopen(VMPDataPath(@"vmp-panel-diag.log").fileSystemRepresentation, "a");
-        if (!fp) return;
-        char ts[32] = "?";
-        time_t tt = time(NULL);
-        struct tm tmv;
-        if (localtime_r(&tt, &tmv)) strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
-        fprintf(fp, "[%s] %s\n", ts, msg.UTF8String ?: "");
-        fclose(fp);
+        if (fp) {
+            fprintf(fp, "%s\n", line.UTF8String ?: "");
+            fclose(fp);
+        }
     } @catch (NSException *e) { }
+    @try {
+        FILE *fp = fopen("/tmp/vmp-panel-diag.log", "a");
+        if (fp) {
+            fprintf(fp, "%s\n", line.UTF8String ?: "");
+            fclose(fp);
+        }
+    } @catch (NSException *e) { }
+    @try {
+        // defaults 域留尾部 40 行，防止无限膨胀
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        NSMutableArray *lines = [[d stringArrayForKey:@"VMPDiagLog"] mutableCopy]
+                                ?: [NSMutableArray array];
+        [lines addObject:line];
+        while (lines.count > 40) [lines removeObjectAtIndex:0];
+        [d setObject:lines forKey:@"VMPDiagLog"];
+        [d synchronize];
+    } @catch (NSException *e) { }
+}
+
+// 类层级诊断：沿链打印 + 两个关键断言（是否 UIViewController / 是否响应崩溃 setter）
+void VMPDiagHierarchy(id obj, NSString *tag) {
+    @try {
+        Class c = [obj class];
+        NSMutableString *chain = [NSMutableString string];
+        Class cur = c;
+        int depth = 0;
+        while (cur && depth < 6) {
+            [chain appendFormat:@"%@ <- ", NSStringFromClass(cur) ?: @"(nil)"];
+            cur = class_getSuperclass(cur);
+            depth++;
+        }
+        [chain appendString:@"..."];
+        VMPDiagLog(@"[%@] class=%@ | chain=%@ | isVC=%d respSetExt=%d",
+            tag,
+            c ? NSStringFromClass(c) : @"(nil)",
+            chain,
+            (int)[obj isKindOfClass:[UIViewController class]],
+            (int)[obj respondsToSelector:@selector(setExtendedLayoutIncludesOpaqueBars:)]);
+    } @catch (NSException *e) {
+        VMPDiagLog(@"[%@] 层级诊断异常: %@", tag, e);
+    }
 }
 
 #pragma mark - 扫描

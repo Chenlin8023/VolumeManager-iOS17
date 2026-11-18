@@ -10,17 +10,28 @@
 
 @implementation VMPRootListController
 
+// 二进制加载即诊（dlopen 时机，早于一切）：加载时类层级
++ (void)load {
+    VMPDiagLog(@"+load: bundle binary loaded, rootClass=%@ rootSuper=%@",
+        NSStringFromClass([VMPRootListController class]),
+        [VMPRootListController superclass]
+            ? NSStringFromClass([VMPRootListController superclass]) : @"(nil)");
+}
+
 // PS 契约：推 detail 时 controllerForSpecifier: 会无设防调用 initWithSpecifier:
 // （实机崩溃实锤 2026-11-18）——基类头未声明该 selector，子类自带实现走
 // [super init] 安全链（根页无上下文，空实现即可）。
 - (instancetype)initWithSpecifier:(PSSpecifier *)specifier {
     if ((self = [super init])) {
-        // 诊断（PS 契约崩溃排查）：类层级在运行时的真实形态
-        VMPDiagLog(@"%@ init: superclass=%@ isVC=%d respSetExt=%d",
-              NSStringFromClass([self class]),
-              [self superclass] ? NSStringFromClass([self superclass]) : @"(nil)",
-              (int)[self isKindOfClass:[UIViewController class]],
-              (int)[self respondsToSelector:@selector(setExtendedLayoutIncludesOpaqueBars:)]);
+        VMPDiagHierarchy(self, @"root-initSpec");
+    }
+    return self;
+}
+
+// 普通路径防御：若 PS 走 plain init 创建（不调 initWithSpecifier:），也留诊断
+- (instancetype)init {
+    if ((self = [super init])) {
+        VMPDiagHierarchy(self, @"root-plain-init");
     }
     return self;
 }

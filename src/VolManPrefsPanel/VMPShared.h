@@ -44,8 +44,9 @@ double VMPVolumeInfoGetVolume(NSDictionary *root, NSString *bid, BOOL *matched);
 // ── 通知 ──────────────────────────────────────────────────────────────────
 void VMPPostSettingChanged(void);
 
-// ── 诊断（面板排障专用；写数据目录 vmp-panel-diag.log，Settings 可写） ────
+// ── 诊断（面板排障专用；四通道：jbroot 文件 / /tmp / Settings defaults 域 / NSLog） ────
 void VMPDiagLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1, 2);
+void VMPDiagHierarchy(id obj, NSString *tag);   // 类层级真相（chain/isVC/respSetExt）
 
 // ── 扫描 ──────────────────────────────────────────────────────────────────
 @interface VMPAppEntry : NSObject
