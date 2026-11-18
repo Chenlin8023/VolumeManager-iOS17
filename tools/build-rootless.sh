@@ -86,6 +86,31 @@ build_one() {
       PANEL_DST="$DST/layout/Library/PreferenceBundles/VolManPrefsPanel.bundle"
       mkdir -p "$PANEL_DST"
       cp -a "$PANELPRE/VolManPrefsPanel.bundle/." "$PANEL_DST/"
+      # Info.plist（CI 产物不带；Preferences 加载 bundle 必需）
+      cat > "$PANEL_DST/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleExecutable</key>
+	<string>VolManPrefsPanel</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.local.volmanprefspanel</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>VolManPrefsPanel</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1.0.0</string>
+</dict>
+</plist>
+EOF
       # 图标沿用闭源面板的
       cp -f "$DST/orig/var/jb/Library/PreferenceBundles/VolumeManagerPrefs.bundle/icon.png" "$PANEL_DST/icon.png" 2>/dev/null || true
       # PreferenceLoader 入口（音量管理器）
