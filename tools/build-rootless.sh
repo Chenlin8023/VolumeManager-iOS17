@@ -108,6 +108,8 @@ build_one() {
 	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>1.0.0</string>
+	<key>NSPrincipalClass</key>
+	<string>VMPRootListController</string>
 </dict>
 </plist>
 EOF
