@@ -44,6 +44,9 @@ double VMPVolumeInfoGetVolume(NSDictionary *root, NSString *bid, BOOL *matched);
 // ── 通知 ──────────────────────────────────────────────────────────────────
 void VMPPostSettingChanged(void);
 
+// ── 诊断（面板排障专用；写数据目录 vmp-panel-diag.log，Settings 可写） ────
+void VMPDiagLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1, 2);
+
 // ── 扫描 ──────────────────────────────────────────────────────────────────
 @interface VMPAppEntry : NSObject
 @property (nonatomic, copy) NSString *bid;

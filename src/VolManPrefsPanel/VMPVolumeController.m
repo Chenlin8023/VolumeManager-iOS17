@@ -14,7 +14,7 @@
     if ((self = [super init])) {
         self.bid = [[specifier propertyForKey:@"bid"] copy];
         self.appName = [[specifier propertyForKey:@"appName"] copy] ?: self.bid;
-        NSLog(@"[VMP] %@ init: superclass=%@ isVC=%d respSetExt=%d",
+        VMPDiagLog(@"%@ init: superclass=%@ isVC=%d respSetExt=%d",
               NSStringFromClass([self class]),
               [self superclass] ? NSStringFromClass([self superclass]) : @"(nil)",
               (int)[self isKindOfClass:[UIViewController class]],

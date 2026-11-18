@@ -16,7 +16,7 @@
 - (instancetype)initWithSpecifier:(PSSpecifier *)specifier {
     if ((self = [super init])) {
         // 诊断（PS 契约崩溃排查）：类层级在运行时的真实形态
-        NSLog(@"[VMP] %@ init: superclass=%@ isVC=%d respSetExt=%d",
+        VMPDiagLog(@"%@ init: superclass=%@ isVC=%d respSetExt=%d",
               NSStringFromClass([self class]),
               [self superclass] ? NSStringFromClass([self superclass]) : @"(nil)",
               (int)[self isKindOfClass:[UIViewController class]],

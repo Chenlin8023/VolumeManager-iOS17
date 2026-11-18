@@ -5,6 +5,7 @@
 #import "VMPShared.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <time.h>
 
 #pragma mark - 路径
 
@@ -158,6 +159,24 @@ void VMPPostSettingChanged(void) {
             CFNotificationCenterGetDarwinNotifyCenter(),
             CFSTR("com.sunshinesong.volume-manager-prefs.settingOnChanged"),
             NULL, NULL, TRUE);
+    } @catch (NSException *e) { }
+}
+
+void VMPDiagLog(NSString *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSLog(@"[VMP] %@", msg);
+    @try {
+        FILE *fp = fopen(VMPDataPath(@"vmp-panel-diag.log").fileSystemRepresentation, "a");
+        if (!fp) return;
+        char ts[32] = "?";
+        time_t tt = time(NULL);
+        struct tm tmv;
+        if (localtime_r(&tt, &tmv)) strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+        fprintf(fp, "[%s] %s\n", ts, msg.UTF8String ?: "");
+        fclose(fp);
     } @catch (NSException *e) { }
 }
 
