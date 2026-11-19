@@ -1,8 +1,9 @@
 /*
  * VMPRootListController.m —— 根页（v5：PS 原生渲染）
- * 总开关/混音开关 = defaults 域绑定（PS 原生读写 + PostNotification，零 get/set 代码）：
- *   isEnabledManagementAppVolume —— 引擎热轮询直接吃
- *   vmMixEnabled —— 引擎 VMMixLoadConfig 的 prefs 域候选已认（重启 App 生效）
+ * 总开关/混音开关 = v5.4 文件通道直写（VMPShared，旧面板同款 read-modify-write）：
+ *   isEnabledManagementAppVolume —— HUD/引擎两侧都直接读该 plist 文件
+ *   vmMixEnabled + isEnabledMixable —— 引擎 VMMixLoadConfig prefs 域候选已认
+ * 每次写完 post settingOnChanged（旧面板同款；HUD 观察该通知并当场重读文件）
  * 链接行 = push 白名单页 / 音量调节页
  * specifiers 构建后 KVC 写基类 _specifiers ivar（PS 自己的 delegate 方法读它）
  */
@@ -82,6 +83,9 @@ static NSString * const kPrefsDomain = @"com.sunshinesong.volume-manager-prefs";
 }
 - (void)setMixValue:(id)value forSpecifier:(PSSpecifier *)spec {
     VMPMixEnabledWrite([value boolValue]);
+    // v5.4：混音双 key 落盘后也发通知（旧面板每次保存都发；闭源主模块读
+    // isEnabledMixable 决定弹出条件，与 HUD 同机制——收到通知才重读文件）
+    VMPPostSettingChanged();
 }
 
 - (void)viewDidLoad {

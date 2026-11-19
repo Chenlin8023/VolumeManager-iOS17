@@ -40,58 +40,72 @@ BOOL VMPWritePlist(id plist, NSString *path) {
     }
 }
 
-#pragma mark - 总开关（v5.3：CFPreferences 通道——直写文件会被 cfprefsd 域缓存回冲覆盖，实机踩坑：新面板开关"无效"）
+#pragma mark - 总开关（v5.4：文件通道——旧面板同款）
 
-static NSString * const kSunDomainCF = @"com.sunshinesong.volume-manager-prefs";
+// 2026-11-19 RE 实锤（Ghidra 反编译 VolumeManagerPrefs / VolumeManagerSBHUD）：
+//   · 闭源旧面板写开关 = initWithContentsOfFile → setObject:forKey: →
+//     writeToFile:atomically: → post settingOnChanged，全程不用 CFPreferences；
+//   · HUD（SpringBoard 侧）观察 settingOnChanged / showVMHUD 两个 Darwin 通知，
+//     回调每次重新读该 plist 文件并刷新 isEnabledManagementAppVolume /
+//     HUDDisplayMeetTheConditions 两个缓存；引擎 VMPrefsEnabled() 同样直接读文件。
+//   · v5.3 的 CFPreferences 通道由 cfprefsd 延迟落盘 → 通知到达时文件仍是旧值
+//     → HUD 必须注销才刷新（v5.3 实机：开关+注销才生效）。v5.4 改回文件通道，
+//     写完立即发通知，HUD/引擎当场吃到。
+//   · 读写都用读改写保住文件里其他 key（旧面板同款：整字典写回）。
+
+static NSString * const kSunKeyMaster = @"isEnabledManagementAppVolume";
 
 BOOL VMPMasterEnabledRead(void) {
     @try {
-        CFTypeRef v = CFPreferencesCopyAppValue(
-            CFSTR("isEnabledManagementAppVolume"),
-            (__bridge CFStringRef)kSunDomainCF);
-        if (!v) return YES;
-        BOOL r = [(__bridge NSNumber *)v respondsToSelector:@selector(boolValue)]
-                 ? [(__bridge NSNumber *)v boolValue] : YES;
-        CFRelease(v);
-        return r;
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:VMPSunPrefsPath()];
+        if (![d isKindOfClass:[NSDictionary class]]) return YES;
+        id v = d[kSunKeyMaster];
+        if (!v) return YES;   // 键缺失 = 默认启用（与引擎 VMPrefsEnabled 同口径）
+        return [v respondsToSelector:@selector(boolValue)]
+               ? [v boolValue] : YES;
     } @catch (NSException *e) { return YES; }
 }
 
 BOOL VMPMasterEnabledWrite(BOOL enabled) {
     @try {
-        CFPreferencesSetAppValue(CFSTR("isEnabledManagementAppVolume"),
-                                 (__bridge CFTypeRef)(@(enabled)),
-                                 (__bridge CFStringRef)kSunDomainCF);
-        CFPreferencesAppSynchronize((__bridge CFStringRef)kSunDomainCF);
-        return YES;
-    } @catch (NSException *e) { return NO; }
+        NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:VMPSunPrefsPath()];
+        if (![d isKindOfClass:[NSMutableDictionary class]]) d = [NSMutableDictionary dictionary];
+        d[kSunKeyMaster] = @(enabled);
+        BOOL ok = [(NSDictionary *)d writeToFile:VMPSunPrefsPath() atomically:YES];
+        VMPDiagLog(@"master write=%d ok=%d", enabled ? 1 : 0, ok ? 1 : 0);
+        return ok;
+    } @catch (NSException *e) {
+        VMPDiagLog(@"master write 异常: %@", e);
+        return NO;
+    }
 }
 
-#pragma mark - 混音（v5.3：CFPreferences 双 key——vmMixEnabled 引擎 + isEnabledMixable 闭源 HUD）
+#pragma mark - 混音（v5.4：文件通道双 key——vmMixEnabled 引擎 + isEnabledMixable 闭源主模块，读改写一次落盘）
 
 BOOL VMPMixEnabledRead(void) {
     @try {
-        CFTypeRef v = CFPreferencesCopyAppValue(
-            CFSTR("vmMixEnabled"), (__bridge CFStringRef)kSunDomainCF);
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:VMPSunPrefsPath()];
+        if (![d isKindOfClass:[NSDictionary class]]) return YES;
+        id v = d[@"vmMixEnabled"];
         if (!v) return YES;
-        BOOL r = [(__bridge NSNumber *)v respondsToSelector:@selector(boolValue)]
-                 ? [(__bridge NSNumber *)v boolValue] : YES;
-        CFRelease(v);
-        return r;
+        return [v respondsToSelector:@selector(boolValue)]
+               ? [v boolValue] : YES;
     } @catch (NSException *e) { return YES; }
 }
 
 BOOL VMPMixEnabledWrite(BOOL enabled) {
     @try {
-        CFPreferencesSetAppValue(CFSTR("vmMixEnabled"),
-                                 (__bridge CFTypeRef)(@(enabled)),
-                                 (__bridge CFStringRef)kSunDomainCF);
-        CFPreferencesSetAppValue(CFSTR("isEnabledMixable"),
-                                 (__bridge CFTypeRef)(@(enabled)),
-                                 (__bridge CFStringRef)kSunDomainCF);
-        CFPreferencesAppSynchronize((__bridge CFStringRef)kSunDomainCF);
-        return YES;
-    } @catch (NSException *e) { return NO; }
+        NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:VMPSunPrefsPath()];
+        if (![d isKindOfClass:[NSMutableDictionary class]]) d = [NSMutableDictionary dictionary];
+        d[@"vmMixEnabled"] = @(enabled);
+        d[@"isEnabledMixable"] = @(enabled);
+        BOOL ok = [(NSDictionary *)d writeToFile:VMPSunPrefsPath() atomically:YES];
+        VMPDiagLog(@"mix write=%d ok=%d", enabled ? 1 : 0, ok ? 1 : 0);
+        return ok;
+    } @catch (NSException *e) {
+        VMPDiagLog(@"mix write 异常: %@", e);
+        return NO;
+    }
 }
 
 #pragma mark - 白名单
@@ -278,17 +292,30 @@ NSArray<VMPAppEntry *> *VMPScanApps(void) {
         int skipped = 0;
         // 逐条防御（v5.2）：255 个元素里混有非 LSApplicationProxy 的占位对象，
         // 直接调属性会 unrecognized selector（v5.1 实机：异常被 @try 吞掉→0 项）
+        // v5.4：bundleURL 先探后调（v5.3 实机 255/255 全抛 NSInvalidArgumentException
+        // 的疑点，见台账 06 待解#1）；@catch 落 reason 指认抛点 selector。
         for (id proxy in apps) {
             @try {
-                if (![proxy respondsToSelector:@selector(bundleIdentifier)]) { skipped++; continue; }
+                if (![proxy respondsToSelector:@selector(bundleIdentifier)]) {
+                    skipped++;
+                    VMPDiagLog(@"scan: 跳过 无bundleIdentifier选择器 cls=%@",
+                               NSStringFromClass([proxy class]));
+                    continue;
+                }
                 NSString *bid = [proxy bundleIdentifier];
-                if (!bid.length) { skipped++; continue; }
+                if (!bid.length) {
+                    skipped++;
+                    VMPDiagLog(@"scan: 跳过 空bid cls=%@", NSStringFromClass([proxy class]));
+                    continue;
+                }
                 VMPAppEntry *e = [VMPAppEntry new];
                 e.bid = bid;
                 e.name = [proxy respondsToSelector:@selector(localizedName)]
                          ? ([proxy localizedName] ?: bid) : bid;
                 e.icon = VMPIconForBid(bid);
-                NSString *path = [[proxy bundleURL] path] ?: @"";
+                NSURL *burl = [proxy respondsToSelector:@selector(bundleURL)]
+                              ? [proxy bundleURL] : nil;
+                NSString *path = [burl path] ?: @"";
                 e.isSystem = [path hasPrefix:@"/System/"];
                 id modes = [proxy respondsToSelector:@selector(infoDictionary)]
                            ? [proxy infoDictionary][@"UIBackgroundModes"] : nil;
@@ -297,7 +324,9 @@ NSArray<VMPAppEntry *> *VMPScanApps(void) {
                 [out addObject:e];
             } @catch (NSException *pe) {
                 skipped++;
-                VMPDiagLog(@"scan: 单条跳过（%@）", pe.name);
+                VMPDiagLog(@"scan: 单条跳过 name=%@ reason=%@",
+                           pe.name ?: @"(nil)",
+                           pe.reason ?: [pe.callStackSymbols firstObject] ?: @"(nil)");
             }
         }
         // volumeInfo 已配置标记 + 默认排序（先非系统按名排序，系统应用垫底）
