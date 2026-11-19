@@ -126,7 +126,6 @@ static IMP VHPSwizzle(Class cls, SEL sel, IMP imp);
 // ===========================================================================
 static NSArray<NSString *> *VHPWhitelistBids(NSString **outWhy) {
     @try {
-        NSFileManager *fm = [NSFileManager defaultManager];
         for (NSString *d in VHPDirs()) {
             NSString *p = [d stringByAppendingPathComponent:@"appwhitelist.plist"];
             NSDictionary *r = [NSDictionary dictionaryWithContentsOfFile:p];
