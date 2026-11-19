@@ -5,9 +5,20 @@
  * Section 1：已启用应用的音量调节入口（push 音量页）。
  * 种子语义：白名单文件不存在时，首次进入按默认值创建一次
  * （音频类 + volumeInfo 已配置 且非系统应用 = 勾）；之后文件即唯一真相。
+ * v5.6（2026-11-19 实机反馈：255 项平铺翻阅太麻烦）：
+ *   · 表头 UISearchBar 过滤（应用名/bid 大小写不敏感子串）——**不走 PS 内建
+ *     搜索机制**（v4 卡死真因就是 PSListController 的 nav-attached 搜索栏布局
+ *     死循环；普通 tableHeaderView 挂 UISearchBar 不碰那套机器）。
+ *   · 开关列表分两段：应用（非系统）/ 系统组件，段头带数量。
+ *   · 音量调节段跟随过滤词。
  */
 #import "VMPControllers.h"
+#import <UIKit/UIKit.h>
 
+@interface VMPWhitelistController () <UISearchBarDelegate>
+@property (nonatomic, strong) UISearchBar *searchBar;
+@property (nonatomic, copy) NSString *searchText;
+@end
 
 @implementation VMPWhitelistController
 
@@ -28,6 +39,23 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"应用白名单";
+
+    // v5.6 搜索栏（tableHeaderView 挂 UISearchBar；table 用 KVC 取，避开 CI 头差异）
+    @try {
+        UITableView *tv = [self valueForKey:@"table"];
+        if ([tv isKindOfClass:[UITableView class]]) {
+            UISearchBar *sb = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 0, tv.bounds.size.width ?: 320, 44)];
+            sb.placeholder = @"搜索应用名或 Bundle ID";
+            sb.delegate = self;
+            sb.autocorrectionType = UITextAutocorrectionTypeNo;
+            sb.autocapitalizationType = UITextAutocapitalizationTypeNone;
+            self.searchBar = sb;
+            tv.tableHeaderView = sb;
+        }
+    } @catch (NSException *e) {
+        VMPDiagLog(@"whitelist v5: 搜索栏挂载异常 %@", e.name);
+    }
+
     if (self.scanned) return;
     self.scanned = YES;
 
@@ -47,6 +75,38 @@
             VMPDiagLog(@"whitelist: 扫描完成 %lu 项", (unsigned long)apps.count);
         });
     });
+}
+
+#pragma mark - 搜索（v5.6）
+
+- (void)searchBar:(UISearchBar *)sb textDidChange:(NSString *)text {
+    self.searchText = text;
+    [self reloadWhitelist];
+}
+
+- (void)searchBarSearchButtonClicked:(UISearchBar *)sb {
+    [sb resignFirstResponder];
+}
+
+- (void)searchBarCancelButtonClicked:(UISearchBar *)sb {
+    sb.text = @"";
+    self.searchText = nil;
+    [sb resignFirstResponder];
+    [self reloadWhitelist];
+}
+
+// 过滤词匹配：应用名或 bid 大小写不敏感子串；空词 = 全量
+- (NSArray<VMPAppEntry *> *)filteredApps {
+    NSString *q = [self.searchText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (q.length == 0) return self.apps ?: @[];
+    NSMutableArray<VMPAppEntry *> *out = [NSMutableArray array];
+    for (VMPAppEntry *e in self.apps) {
+        if ([e.name rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [e.bid  rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            [out addObject:e];
+        }
+    }
+    return out;
 }
 
 // 首建补种：音频类 + 已配置 且非系统应用 → 勾（文件从此存在 → 引擎进入白名单模式）
@@ -77,6 +137,23 @@
 
 #pragma mark - specifiers
 
+// 开关行构建（v5.6 抽出：应用段 + 系统段各调一次）
+- (void)vmp_appendSwitches:(NSMutableArray *)specs
+                     apps:(NSArray<VMPAppEntry *> *)list {
+    for (VMPAppEntry *e in list) {
+        NSString *title = e.name;
+        if (e.isSystem) title = [title stringByAppendingString:@"（系统）"];
+        if (e.hasAudioMode) title = [@"♪ " stringByAppendingString:title];
+        PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:title
+            target:self set:@selector(setInjectValue:forSpecifier:)
+            get:@selector(injectValueForSpecifier:)
+            detail:nil cell:PSSwitchCell edit:nil];
+        [sp setProperty:e.bid forKey:@"bid"];
+        if (e.icon) [sp setProperty:e.icon forKey:@"icon"];
+        [specs addObject:sp];
+    }
+}
+
 - (NSMutableArray *)vmp_buildSpecifiers {
     NSMutableArray *specs = [NSMutableArray array];
 
@@ -97,20 +174,31 @@
         return specs;
     }
 
-    NSMutableArray<NSString *> *en = [self currentEnabled];
-
-    for (VMPAppEntry *e in self.apps) {
-        NSString *title = e.name;
-        if (e.isSystem) title = [title stringByAppendingString:@"（系统）"];
-        if (e.hasAudioMode) title = [@"♪ " stringByAppendingString:title];
-        PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:title
-            target:self set:@selector(setInjectValue:forSpecifier:)
-            get:@selector(injectValueForSpecifier:)
-            detail:nil cell:PSSwitchCell edit:nil];
-        [sp setProperty:e.bid forKey:@"bid"];
-        if (e.icon) [sp setProperty:e.icon forKey:@"icon"];
-        [specs addObject:sp];
+    // v5.6：过滤 + 两段分组（应用 / 系统组件），段头带数量
+    NSArray<VMPAppEntry *> *list = [self filteredApps];
+    NSMutableArray<VMPAppEntry *> *userApps = [NSMutableArray array];
+    NSMutableArray<VMPAppEntry *> *sysApps = [NSMutableArray array];
+    for (VMPAppEntry *e in list) {
+        if (e.isSystem) [sysApps addObject:e]; else [userApps addObject:e];
     }
+
+    PSSpecifier *gUser = [PSSpecifier groupSpecifierWithName:
+        [NSString stringWithFormat:@"应用（%lu）", (unsigned long)userApps.count]];
+    [specs addObject:gUser];
+    [self vmp_appendSwitches:specs apps:userApps];
+    if (userApps.count == 0) {
+        [specs addObject:[PSSpecifier groupSpecifierWithName:@"（无匹配应用）"]];
+    }
+
+    PSSpecifier *gSys = [PSSpecifier groupSpecifierWithName:
+        [NSString stringWithFormat:@"系统组件（%lu）", (unsigned long)sysApps.count]];
+    [specs addObject:gSys];
+    [self vmp_appendSwitches:specs apps:sysApps];
+    if (sysApps.count == 0) {
+        [specs addObject:[PSSpecifier groupSpecifierWithName:@"（无匹配系统组件）"]];
+    }
+
+    NSMutableArray<NSString *> *en = [self currentEnabled];
 
     PSSpecifier *g2 = [PSSpecifier groupSpecifierWithName:@"音量调节"];
     [g2 setProperty:@"点按行进入滑杆，音量即时生效（0 = 静音）；未列出的应用音量为 1.0。"
@@ -120,6 +208,11 @@
     NSUInteger linkCount = 0;
     for (VMPAppEntry *e in self.apps) {
         if (![en containsObject:e.bid]) continue;
+        if (self.searchText.length > 0 &&
+            [e.name rangeOfString:self.searchText options:NSCaseInsensitiveSearch].location == NSNotFound &&
+            [e.bid  rangeOfString:self.searchText options:NSCaseInsensitiveSearch].location == NSNotFound) {
+            continue;   // v5.6：音量调节段跟随过滤词
+        }
         PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:e.name
             target:self set:NULL get:NULL
             detail:[VMPVolumeController class] cell:PSLinkCell edit:nil];

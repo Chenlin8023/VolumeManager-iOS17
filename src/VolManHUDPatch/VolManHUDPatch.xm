@@ -118,8 +118,12 @@ static IMP VHPSwizzle(Class cls, SEL sel, IMP imp);
 
 // ===========================================================================
 // v0.5 列表白名单过滤
-//   数据源 = -[UIApplication runningAppProcesses]（HUD 列表重建 FUN_0000dd94
-//   的唯一来源，经 VMProcess 助手 FUN_00008170 调用）。
+//   数据源 = -[AXSpringBoardServer runningAppProcesses]（HUD 列表重建
+//   FUN_0000dd94 的唯一来源，经 VMProcess 助手 FUN_00008170 调用；
+//   v0.5 实机反馈过滤无效后复核反编译定案：receiver 是 AXSpringBoardServer
+//   （AccessibilityUtilities），**不是** UIApplication——v0.5a 挂错类=死代码，
+//   v0.5b 修正）。同 server 的 applicationWithIdentifier:（FUN_000082e0，
+//   按 bid 查前台应用）不挂钩——只过滤列表内容，不动 HUD 的显示判定。
 //   名单 = 数据目录 appwhitelist.plist 的 enabled 数组；文件缺失/不可解析 =
 //   兼容模式 = 不过滤（与引擎 VMWhitelistDecide 的 legacy 语义一致，老用户
 //   零行为变化）。名单每次调用现读——面板改名单即时生效。
@@ -187,22 +191,31 @@ static NSArray *VHPRunningProcsHook(id self, SEL _cmd) {
     }
 }
 
-// UIApplication 是 Apple 常驻类，ctor 后必已注册——独立于 HUD 类的挂载时机，
-// 挂靠同一扫描周期（主队列 tick），挂一次即止。
+// v0.5b：挂 AXSpringBoardServer（HUD 实际使用的进程源）。AX 类在 SpringBoard
+// 常驻（辅助功能基础设施），扫描周期首个 tick 即注册；未就绪时静默等待 +
+// 有限日志（硬规则：静默失败必须留日志）。
+static int gVHPFilterProbeLogs = 0;
 static void VHPAttachFilter(void) {
     if (gFilterAttached) return;
-    Class ui = objc_getClass("UIApplication");
-    if (!ui) return;   // 理论不可达（SpringBoard 有 UIKit），等下个 tick
-    IMP o = VHPSwizzle(ui, @selector(runningAppProcesses), (IMP)&VHPRunningProcsHook);
+    Class ax = objc_getClass("AXSpringBoardServer");
+    if (!ax) {
+        if (gVHPFilterProbeLogs < 3) {
+            gVHPFilterProbeLogs++;
+            VHPLog(@"AXSpringBoardServer 未注册（第 %d 个扫描周期，继续等待）",
+                   gVHPFilterProbeLogs);
+        }
+        return;
+    }
+    IMP o = VHPSwizzle(ax, @selector(runningAppProcesses), (IMP)&VHPRunningProcsHook);
     if (o) {
         gOrigRunningProcs = o;
         gFilterAttached = 1;
-        VHPLog(@"已挂 UIApplication runningAppProcesses（列表过滤=%d）", gVHPFilter);
+        VHPLog(@"已挂 AXSpringBoardServer runningAppProcesses（列表过滤=%d）", gVHPFilter);
     } else {
-        // 防误伤守卫拒绝（方法非 UIApplication 自有实现）——记日志并放弃，
+        // 防误伤守卫拒绝（方法非该类自有实现）——记日志并放弃，
         // 透明化扫描式不受影响。
         gFilterAttached = 1;
-        VHPLog(@"runningAppProcesses 挂钩被守卫拒绝（非自有实现）→ 过滤不生效");
+        VHPLog(@"AXSpringBoardServer runningAppProcesses 挂钩被守卫拒绝（非自有实现）→ 过滤不生效");
     }
 }
 
