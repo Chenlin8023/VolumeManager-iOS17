@@ -40,39 +40,94 @@ BOOL VMPWritePlist(id plist, NSString *path) {
     }
 }
 
-#pragma mark - 总开关（v5.4：文件通道——旧面板同款）
+#pragma mark - 总开关/混音（v5.5：多候选路径读改写 + 每路径自证日志）
 
-// 2026-11-19 RE 实锤（Ghidra 反编译 VolumeManagerPrefs / VolumeManagerSBHUD）：
-//   · 闭源旧面板写开关 = initWithContentsOfFile → setObject:forKey: →
-//     writeToFile:atomically: → post settingOnChanged，全程不用 CFPreferences；
-//   · HUD（SpringBoard 侧）观察 settingOnChanged / showVMHUD 两个 Darwin 通知，
-//     回调每次重新读该 plist 文件并刷新 isEnabledManagementAppVolume /
-//     HUDDisplayMeetTheConditions 两个缓存；引擎 VMPrefsEnabled() 同样直接读文件。
-//   · v5.3 的 CFPreferences 通道由 cfprefsd 延迟落盘 → 通知到达时文件仍是旧值
-//     → HUD 必须注销才刷新（v5.3 实机：开关+注销才生效）。v5.4 改回文件通道，
-//     写完立即发通知，HUD/引擎当场吃到。
-//   · 读写都用读改写保住文件里其他 key（旧面板同款：整字典写回）。
+// v5.4 复测（diag(16) 10:42）：master/mix write ok=1 但 HUD 不反应。RE 已实锤
+// HUD 观察通知并每次重读文件（FUN_00008c28 清缓存→FUN_00008b34 重载），所以
+// 只剩"我们写的文件 ≠ HUD 读的文件"一种解释：旧面板/HUD 内嵌 libroot 运行时
+// 重映射（_libroot_dyn_jbrootpath），我们面板不带 libroot——单路径写可能落在
+// 另一个世界。v5.5 镜像引擎已实机的三候选模式（Tweak.xm VMMixConfigCandidates
+// 同款：裸路径 / /var/jb 前缀 / /.jbroot 前缀），写全部候选 + 逐路径落日志 +
+// 回读验证，无论 interposition 是否生效都能命中 HUD 的文件。
 
-static NSString * const kSunKeyMaster = @"isEnabledManagementAppVolume";
+static NSString *VMPSunPrefsBase(void) {
+    return @"/var/mobile/Library/Preferences/com.sunshinesong.volume-manager-prefs.plist";
+}
+
+static NSArray<NSString *> *VMPSunPrefsCandidates(void) {
+    NSString *base = VMPSunPrefsBase();
+    return @[ base,
+              [@"/var/jb" stringByAppendingString:base],
+              [@"/.jbroot" stringByAppendingString:base] ];
+}
+
+// 返回（候选路径, 逐路径 ok 数组）：全部尝试，失败路径照常记录
+static BOOL VMPWriteSunPrefsAll(NSDictionary *dict, NSArray<NSString *> **usedPaths, NSMutableArray<NSNumber *> **oks) {
+    BOOL any = NO;
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *results = [NSMutableArray array];
+    for (NSString *p in VMPSunPrefsCandidates()) {
+        @try {
+            NSString *dir = [p stringByDeletingLastPathComponent];
+            [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                      withIntermediateDirectories:YES attributes:nil error:NULL];
+            BOOL ok = VMPWritePlist(dict, p);
+            [paths addObject:p];
+            [results addObject:@(ok ? 1 : 0)];
+            if (ok) any = YES;
+            VMPDiagLog(@"sunprefs write ok=%d path=%@", ok ? 1 : 0, p);
+        } @catch (NSException *e) {
+            [paths addObject:p];
+            [results addObject:@0];
+            VMPDiagLog(@"sunprefs write 异常 path=%@ err=%@", p, e.name);
+        }
+    }
+    if (usedPaths) *usedPaths = paths;
+    if (oks) *oks = results;
+    return any;
+}
+
+// 读：第一个可读且含键的候选（同 VMPWhitelistRead 模式）
+static id VMPSunPrefsValue(NSString *key) {
+    for (NSString *p in VMPSunPrefsCandidates()) {
+        @try {
+            NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
+            if (![d isKindOfClass:[NSDictionary class]]) continue;
+            id v = d[key];
+            if (v) return v;
+        } @catch (NSException *e) { }
+    }
+    return nil;
+}
+
+static NSMutableDictionary *VMPSunPrefsLoadMutable(void) {
+    for (NSString *p in VMPSunPrefsCandidates()) {
+        @try {
+            NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:p];
+            if ([d isKindOfClass:[NSMutableDictionary class]]) return d;
+        } @catch (NSException *e) { }
+    }
+    return [NSMutableDictionary dictionary];
+}
 
 BOOL VMPMasterEnabledRead(void) {
     @try {
-        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:VMPSunPrefsPath()];
-        if (![d isKindOfClass:[NSDictionary class]]) return YES;
-        id v = d[kSunKeyMaster];
+        id v = VMPSunPrefsValue(@"isEnabledManagementAppVolume");
         if (!v) return YES;   // 键缺失 = 默认启用（与引擎 VMPrefsEnabled 同口径）
-        return [v respondsToSelector:@selector(boolValue)]
-               ? [v boolValue] : YES;
+        return [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : YES;
     } @catch (NSException *e) { return YES; }
 }
 
 BOOL VMPMasterEnabledWrite(BOOL enabled) {
     @try {
-        NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:VMPSunPrefsPath()];
-        if (![d isKindOfClass:[NSMutableDictionary class]]) d = [NSMutableDictionary dictionary];
-        d[kSunKeyMaster] = @(enabled);
-        BOOL ok = [(NSDictionary *)d writeToFile:VMPSunPrefsPath() atomically:YES];
-        VMPDiagLog(@"master write=%d ok=%d", enabled ? 1 : 0, ok ? 1 : 0);
+        NSMutableDictionary *d = VMPSunPrefsLoadMutable();
+        d[@"isEnabledManagementAppVolume"] = @(enabled);
+        BOOL ok = VMPWriteSunPrefsAll(d, NULL, NULL);
+        // 回读自证：确认任一候选落盘后能读回新值
+        id back = VMPSunPrefsValue(@"isEnabledManagementAppVolume");
+        BOOL readback = [back respondsToSelector:@selector(boolValue)] ? [back boolValue] : !enabled;
+        VMPDiagLog(@"master write=%d any-ok=%d readback=%d",
+                   enabled ? 1 : 0, ok ? 1 : 0, readback ? 1 : 0);
         return ok;
     } @catch (NSException *e) {
         VMPDiagLog(@"master write 异常: %@", e);
@@ -80,27 +135,24 @@ BOOL VMPMasterEnabledWrite(BOOL enabled) {
     }
 }
 
-#pragma mark - 混音（v5.4：文件通道双 key——vmMixEnabled 引擎 + isEnabledMixable 闭源主模块，读改写一次落盘）
-
 BOOL VMPMixEnabledRead(void) {
     @try {
-        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:VMPSunPrefsPath()];
-        if (![d isKindOfClass:[NSDictionary class]]) return YES;
-        id v = d[@"vmMixEnabled"];
+        id v = VMPSunPrefsValue(@"vmMixEnabled");
         if (!v) return YES;
-        return [v respondsToSelector:@selector(boolValue)]
-               ? [v boolValue] : YES;
+        return [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : YES;
     } @catch (NSException *e) { return YES; }
 }
 
 BOOL VMPMixEnabledWrite(BOOL enabled) {
     @try {
-        NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:VMPSunPrefsPath()];
-        if (![d isKindOfClass:[NSMutableDictionary class]]) d = [NSMutableDictionary dictionary];
+        NSMutableDictionary *d = VMPSunPrefsLoadMutable();
         d[@"vmMixEnabled"] = @(enabled);
         d[@"isEnabledMixable"] = @(enabled);
-        BOOL ok = [(NSDictionary *)d writeToFile:VMPSunPrefsPath() atomically:YES];
-        VMPDiagLog(@"mix write=%d ok=%d", enabled ? 1 : 0, ok ? 1 : 0);
+        BOOL ok = VMPWriteSunPrefsAll(d, NULL, NULL);
+        id back = VMPSunPrefsValue(@"vmMixEnabled");
+        BOOL readback = [back respondsToSelector:@selector(boolValue)] ? [back boolValue] : !enabled;
+        VMPDiagLog(@"mix write=%d any-ok=%d readback=%d",
+                   enabled ? 1 : 0, ok ? 1 : 0, readback ? 1 : 0);
         return ok;
     } @catch (NSException *e) {
         VMPDiagLog(@"mix write 异常: %@", e);
@@ -317,8 +369,18 @@ NSArray<VMPAppEntry *> *VMPScanApps(void) {
                               ? [proxy bundleURL] : nil;
                 NSString *path = [burl path] ?: @"";
                 e.isSystem = [path hasPrefix:@"/System/"];
-                id modes = [proxy respondsToSelector:@selector(infoDictionary)]
-                           ? [proxy infoDictionary][@"UIBackgroundModes"] : nil;
+                // v5.5：iOS 17.2 的 infoDictionary 返回 _LSDataBackedPropertyList，
+                // 不实现 objectForKeyedSubscript:（v5.4 diag(16) 255/255 异常 reason
+                // 实锤：`-[_LSDataBackedPropertyList objectForKeyedSubscript:]`
+                // unrecognized selector）——下标语法换成守卫式 objectForKey:，
+                // 不支持就放弃该标志（列表照常渲染，只影响音频类标记）
+                id modes = nil;
+                if ([proxy respondsToSelector:@selector(infoDictionary)]) {
+                    id info = [proxy infoDictionary];
+                    if ([info respondsToSelector:@selector(objectForKey:)]) {
+                        modes = [info objectForKey:@"UIBackgroundModes"];
+                    }
+                }
                 e.hasAudioMode = [modes isKindOfClass:[NSArray class]]
                                  && [(NSArray *)modes containsObject:@"audio"];
                 [out addObject:e];
