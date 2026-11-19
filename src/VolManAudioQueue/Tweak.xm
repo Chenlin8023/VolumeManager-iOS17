@@ -1797,9 +1797,8 @@ static void VMStartEngine(void) {
             NSString *wlReason = @"";
             if (!skip) wl = VMWhitelistDecide(bid, &wlFile, &wlReason);
             BOOL forcedActive = (forced >= 0.0f && forced <= 1.0f);
-            BOOL wlAllow = (wl != VMWhitelistOut) || forcedActive;
 
-            VMLog(@"=== v2.0.0 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f 白名单=%d",
+            VMLog(@"=== v2.0.2 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f 白名单=%d",
                   bid, enabled, skip, isExt, gVMAQDebug, (double)forced, wl);
             if (!skip) {
                 VMLog(@"白名单：%@ | %@", wlFile ?: @"(未初始化)", wlReason);
@@ -1827,12 +1826,16 @@ static void VMStartEngine(void) {
                 }
             }
 
-            // ②′ 混音策略层：v2.0 起随白名单收窄（docs/05 §二 Q5）——「不注入」
-            //     语义优先于「无条件混音」：名单外 App 连混音 hook 也不装。
-            //     白名单内 / 兼容模式（名单未初始化）仍照旧安装，保证多 App 同播。
-            //     副作用（已接受）：名单外 App 激活音频时可能打断白名单 App 的
-            //     同播——那是 iOS 原生行为，插件不再越权干预。
-            if (!skip && wlAllow) {
+            // ②′ 混音策略层：v2.0.2（方案 A，用户拍板）恢复**全局安装**——
+            //     v2.0 的白名单收窄实机证伪（2026-11-19 晚）：混音的前提是
+            //     「两端 mixable」，名单外音频 App（非 mixable）激活时会掐断
+            //     白名单 App 的同播（docs/04 §五 Q5 预警的副作用成真，用户实感
+            //     =「播放后一个应用音频时前一个被掐断」）。混音回全局后，未勾选
+            //     App 也会被轻量改写音频会话类别（无轮询、无渲染挂钩，压力可
+            //     忽略）；「不注入」语义保留在最重的部分=音量挂钩（白名单裁决
+            //     不变）+ HUD 列表（HUDPatch 过滤）。混音开关/防守模式仍由
+            //     vmMixEnabled / 防守位控制（面板混音开关实时写、通知热刷新）。
+            if (!skip) {
                 VMMixLoadConfig(bid);
                 VMMixInstallHooks();
             }

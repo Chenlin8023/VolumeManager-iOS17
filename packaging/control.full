@@ -1,6 +1,6 @@
 Package: com.local.volmanaudioqueue.full
 Name: VolumeManager (Full)
-Version: 2.0.1
+Version: 2.0.2
 Architecture: iphoneos-arm64
 Section: Tweaks
 Priority: optional
