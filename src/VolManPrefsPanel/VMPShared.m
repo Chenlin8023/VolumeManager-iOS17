@@ -72,6 +72,9 @@ BOOL VMPMixEnabledRead(void) {
     } @catch (NSException *e) { return YES; }
 }
 
+// v5.2：混音写入双写——引擎侧 vmMixEnabled（mixInfo/Preferences mix）+
+// 闭源 HUD 侧 isEnabledMixable（sunshinesong prefs 域：HUD 弹出条件读它，
+// 旧面板多元化开关写的就是这个 key；不同步则 HUD 停弹，实机踩坑）
 BOOL VMPMixEnabledWrite(BOOL enabled) {
     @try {
         BOOL ok = YES;
@@ -81,6 +84,12 @@ BOOL VMPMixEnabledWrite(BOOL enabled) {
             d[@"vmMixEnabled"] = @(enabled);
             if (![d writeToFile:p atomically:YES]) ok = NO;
         }
+        // 闭源 HUD/旧面板一致性：isEnabledMixable（sunshinesong prefs 域）
+        NSString *sun = VMPSunPrefsPath();
+        NSMutableDictionary *sd = [[NSDictionary dictionaryWithContentsOfFile:sun] mutableCopy]
+                                  ?: [NSMutableDictionary dictionary];
+        sd[@"isEnabledMixable"] = @(enabled);
+        if (![sd writeToFile:sun atomically:YES]) ok = NO;
         return ok;
     } @catch (NSException *e) { return NO; }
 }
@@ -267,28 +276,41 @@ NSArray<VMPAppEntry *> *VMPScanApps(void) {
         NSArray *apps = ((NSArray *(*)(id, SEL))objc_msgSend)(ws, allSel);
         VMPDiagLog(@"scan: allInstalledApplications=%lu 项", (unsigned long)apps.count);
         int skipped = 0;
+        // 逐条防御（v5.2）：255 个元素里混有非 LSApplicationProxy 的占位对象，
+        // 直接调属性会 unrecognized selector（v5.1 实机：异常被 @try 吞掉→0 项）
         for (id proxy in apps) {
-            NSString *bid = [proxy bundleIdentifier];
-            if (!bid.length) { skipped++; continue; }
-            VMPAppEntry *e = [VMPAppEntry new];
-            e.bid = bid;
-            e.name = [proxy localizedName] ?: bid;
-            e.icon = VMPIconForBid(bid);
-            NSString *path = [[proxy bundleURL] path] ?: @"";
-            e.isSystem = [path hasPrefix:@"/System/"];
-            id modes = [proxy infoDictionary][@"UIBackgroundModes"];
-            e.hasAudioMode = [modes isKindOfClass:[NSArray class]]
-                             && [(NSArray *)modes containsObject:@"audio"];
-            [out addObject:e];
+            @try {
+                if (![proxy respondsToSelector:@selector(bundleIdentifier)]) { skipped++; continue; }
+                NSString *bid = [proxy bundleIdentifier];
+                if (!bid.length) { skipped++; continue; }
+                VMPAppEntry *e = [VMPAppEntry new];
+                e.bid = bid;
+                e.name = [proxy respondsToSelector:@selector(localizedName)]
+                         ? ([proxy localizedName] ?: bid) : bid;
+                e.icon = VMPIconForBid(bid);
+                NSString *path = [[proxy bundleURL] path] ?: @"";
+                e.isSystem = [path hasPrefix:@"/System/"];
+                id modes = [proxy respondsToSelector:@selector(infoDictionary)]
+                           ? [proxy infoDictionary][@"UIBackgroundModes"] : nil;
+                e.hasAudioMode = [modes isKindOfClass:[NSArray class]]
+                                 && [(NSArray *)modes containsObject:@"audio"];
+                [out addObject:e];
+            } @catch (NSException *pe) {
+                skipped++;
+                VMPDiagLog(@"scan: 单条跳过（%@）", pe.name);
+            }
         }
         // volumeInfo 已配置标记 + 默认排序（先非系统按名排序，系统应用垫底）
         NSDictionary *vol = VMPVolumeInfoReadMutable();
         for (VMPAppEntry *e in out) e.configured = (vol[e.bid] != nil);
+        VMPDiagLog(@"scan: 有效 %lu 项（无 bid/异常跳过 %d）", (unsigned long)out.count, skipped);
         VMPDiagLog(@"scan: 有效 %lu 项（无 bid 跳过 %d）", (unsigned long)out.count, skipped);
         [out sortUsingComparator:^NSComparisonResult(VMPAppEntry *a, VMPAppEntry *b) {
             if (a.isSystem != b.isSystem) return a.isSystem ? NSOrderedDescending : NSOrderedAscending;
             return [a.name caseInsensitiveCompare:b.name];
         }];
-    } @catch (NSException *e) { }
+    } @catch (NSException *e) {
+        VMPDiagLog(@"scan: 整体异常 %@", e);
+    }
     return out;
 }
