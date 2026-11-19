@@ -259,15 +259,17 @@ NSArray<VMPAppEntry *> *VMPScanApps(void) {
     @try {
         // 运行时取类（不产生链接符号引用；方法体内部消息全走动态派发）
         Class wsCls = objc_getClass("LSApplicationWorkspace");
-        if (!wsCls) return out;
+        if (!wsCls) { VMPDiagLog(@"scan: LSApplicationWorkspace 类未找到"); return out; }
         id ws = ((id (*)(id, SEL))objc_msgSend)((id)wsCls, @selector(defaultWorkspace));
         // CI 头适配：不依赖 id 接收器的隐式 selector 声明，显式运行时调用
         SEL allSel = @selector(allInstalledApplications);
-        if (![ws respondsToSelector:allSel]) return out;
+        if (![ws respondsToSelector:allSel]) { VMPDiagLog(@"scan: ws 不响应 allInstalledApplications"); return out; }
         NSArray *apps = ((NSArray *(*)(id, SEL))objc_msgSend)(ws, allSel);
+        VMPDiagLog(@"scan: allInstalledApplications=%lu 项", (unsigned long)apps.count);
+        int skipped = 0;
         for (id proxy in apps) {
             NSString *bid = [proxy bundleIdentifier];
-            if (!bid.length) continue;
+            if (!bid.length) { skipped++; continue; }
             VMPAppEntry *e = [VMPAppEntry new];
             e.bid = bid;
             e.name = [proxy localizedName] ?: bid;
@@ -282,6 +284,7 @@ NSArray<VMPAppEntry *> *VMPScanApps(void) {
         // volumeInfo 已配置标记 + 默认排序（先非系统按名排序，系统应用垫底）
         NSDictionary *vol = VMPVolumeInfoReadMutable();
         for (VMPAppEntry *e in out) e.configured = (vol[e.bid] != nil);
+        VMPDiagLog(@"scan: 有效 %lu 项（无 bid 跳过 %d）", (unsigned long)out.count, skipped);
         [out sortUsingComparator:^NSComparisonResult(VMPAppEntry *a, VMPAppEntry *b) {
             if (a.isSystem != b.isSystem) return a.isSystem ? NSOrderedDescending : NSOrderedAscending;
             return [a.name caseInsensitiveCompare:b.name];

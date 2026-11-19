@@ -31,28 +31,23 @@ static NSString * const kPrefsDomain = @"com.sunshinesong.volume-manager-prefs";
     [g1 setProperty:@"总开关关闭时，所有应用的音量调整与混音全部停止。混音开关在应用下次启动时生效。"
               forKey:@"footerText"];
 
+    // v5.1：代码构建的开关必须给真 get/set selector（NULL=不可交互，实机踩坑）
     PSSpecifier *master = [PSSpecifier preferenceSpecifierNamed:@"启用音量管理"
-        target:self set:NULL get:NULL detail:nil cell:PSSwitchCell edit:nil];
-    [master setProperty:kPrefsDomain forKey:@"defaults"];
-    [master setProperty:@"isEnabledManagementAppVolume" forKey:@"key"];
-    [master setProperty:@"com.sunshinesong.volume-manager-prefs.settingOnChanged" forKey:@"PostNotification"];
-    [master setProperty:@(YES) forKey:@"default"];
+        target:self set:@selector(setMasterValue:forSpecifier:)
+        get:@selector(masterValueForSpecifier:)
+        detail:nil cell:PSSwitchCell edit:nil];
 
     PSSpecifier *mix = [PSSpecifier preferenceSpecifierNamed:@"启用混音（多应用同播）"
-        target:self set:NULL get:NULL detail:nil cell:PSSwitchCell edit:nil];
-    [mix setProperty:kPrefsDomain forKey:@"defaults"];
-    [mix setProperty:@"vmMixEnabled" forKey:@"key"];
-    [mix setProperty:@(YES) forKey:@"default"];
+        target:self set:@selector(setMixValue:forSpecifier:)
+        get:@selector(mixValueForSpecifier:)
+        detail:nil cell:PSSwitchCell edit:nil];
 
     PSSpecifier *g2 = [PSSpecifier groupSpecifierWithName:@"应用"];
     PSSpecifier *wl = [PSSpecifier preferenceSpecifierNamed:@"应用白名单"
         target:self set:NULL get:NULL
         detail:[VMPWhitelistController class] cell:PSLinkCell edit:nil];
-    PSSpecifier *vol = [PSSpecifier preferenceSpecifierNamed:@"音量调节"
-        target:self set:NULL get:NULL
-        detail:[VMPVolumeController class] cell:PSLinkCell edit:nil];
 
-    NSMutableArray *specs = [NSMutableArray arrayWithObjects:g1, master, mix, g2, wl, vol, nil];
+    NSMutableArray *specs = [NSMutableArray arrayWithObjects:g1, master, mix, g2, wl, nil];
     VMPDiagLog(@"root v5: 构建 %lu 项", (unsigned long)specs.count);
     return specs;
 }
@@ -70,6 +65,23 @@ static NSString * const kPrefsDomain = @"com.sunshinesong.volume-manager-prefs";
         VMPDiagLog(@"root v5: KVC _specifiers 失败: %@", e);
     }
     return specs;
+}
+
+#pragma mark - 开关读写（直写 prefs 域文件，引擎 0.5s 轮询直接吃）
+
+- (id)masterValueForSpecifier:(PSSpecifier *)spec {
+    return @(VMPMasterEnabledRead());
+}
+- (void)setMasterValue:(id)value forSpecifier:(PSSpecifier *)spec {
+    VMPMasterEnabledWrite([value boolValue]);
+    VMPPostSettingChanged();
+}
+
+- (id)mixValueForSpecifier:(PSSpecifier *)spec {
+    return @(VMPMixEnabledRead());
+}
+- (void)setMixValue:(id)value forSpecifier:(PSSpecifier *)spec {
+    VMPMixEnabledWrite([value boolValue]);
 }
 
 - (void)viewDidLoad {
