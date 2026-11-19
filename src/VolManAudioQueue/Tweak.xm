@@ -1792,7 +1792,7 @@ static void VMStartEngine(void) {
             if (!skip) wl = VMWhitelistDecide(bid, &wlFile, &wlReason);
             BOOL forcedActive = (forced >= 0.0f && forced <= 1.0f);
 
-            VMLog(@"=== v2.0.3 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f 白名单=%d",
+            VMLog(@"=== v2.0.4 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f 白名单=%d",
                   bid, enabled, skip, isExt, gVMAQDebug, (double)forced, wl);
             if (!skip) {
                 VMLog(@"白名单：%@ | %@", wlFile ?: @"(未初始化)", wlReason);

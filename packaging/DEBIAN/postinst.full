@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-# VolManAudioQueue Full 2.0.3 安装后脚本（全量包）
+# VolManAudioQueue Full 2.0.4 安装后脚本（全量包）
 #
 # 本包自带全套组件，因此不需要「停用原版再补丁」这一套：
 #   自带 → Library/MobileSubstrate/DynamicLibraries/VolumeManager.dylib        (原版·主模块)
@@ -181,7 +181,7 @@ else
 fi
 
 echo ""
-echo "VolManAudioQueue Full 2.0.3: 安装完成。请执行一次 respring（注销）使改动生效。"
+echo "VolManAudioQueue Full 2.0.4: 安装完成。请执行一次 respring（注销）使改动生效。"
 echo "  日志文件：$DIR_JB/vmaq.log"
 echo "  拷贝注入的 App：重启 App 后生效（验收=容器日志头 === v2.0.0 注入）。"
 exit 0
