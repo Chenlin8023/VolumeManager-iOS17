@@ -1,16 +1,13 @@
 /*
  * VMPWhitelistController.m —— 应用白名单页（v5：PS 原生渲染 + 动态 specifiers）
  * 每应用一行：PSSwitchCell（get/set selector 读写 VMPWhitelistRead/Write——引擎
- * 现有白名单文件源零改动）+ 图标（specifier icon 属性）+ bid 副标题。
- * Section 1：已启用应用的音量调节入口（push 音量页）。
+ * 现有白名单文件源零改动）+ 图标（specifier icon 属性）。
  * 种子语义：白名单文件不存在时，首次进入按默认值创建一次
  * （音频类 + volumeInfo 已配置 且非系统应用 = 勾）；之后文件即唯一真相。
- * v5.6（2026-11-19 实机反馈：255 项平铺翻阅太麻烦）：
- *   · 表头 UISearchBar 过滤（应用名/bid 大小写不敏感子串）——**不走 PS 内建
- *     搜索机制**（v4 卡死真因就是 PSListController 的 nav-attached 搜索栏布局
- *     死循环；普通 tableHeaderView 挂 UISearchBar 不碰那套机器）。
- *   · 开关列表分两段：应用（非系统）/ 系统组件，段头带数量。
- *   · 音量调节段跟随过滤词。
+ * v5.6：表头 UISearchBar 过滤（应用名/bid，不走 PS nav-search 机制=v4 死循环
+ * 根源规避；table 用 KVC 取避开 CI 头差异）+ 应用/系统组件两段分组带数量。
+ * v5.7：移除「音量调节」入口段（bid 传参链路不通=闪退 + 与 HUD 滑杆重复；
+ * 交互面收敛为 HUD）。
  */
 #import "VMPControllers.h"
 #import <UIKit/UIKit.h>
@@ -198,32 +195,14 @@
         [specs addObject:[PSSpecifier groupSpecifierWithName:@"（无匹配系统组件）"]];
     }
 
+    // v5.7（2026-11-19 实机反馈）：移除「音量调节」入口段——
+    //   · push 的音量子页 bid 传参链路不通（volume v5 init: bid=(null)，滑杆写入
+    //     nil 键 = 闪退）；
+    //   · 且音量调节的正式交互面 = HUD 滑杆（白名单过滤后仅显示勾选应用），
+    //     面板内再罗列一份属于重复入口。
+    // 保留 VMPVolumeController 类不删（日后若做面板内音量编辑可复用，修 bid 链路）。
+
     NSMutableArray<NSString *> *en = [self currentEnabled];
-
-    PSSpecifier *g2 = [PSSpecifier groupSpecifierWithName:@"音量调节"];
-    [g2 setProperty:@"点按行进入滑杆，音量即时生效（0 = 静音）；未列出的应用音量为 1.0。"
-                 forKey:@"footerText"];
-    [specs addObject:g2];
-
-    NSUInteger linkCount = 0;
-    for (VMPAppEntry *e in self.apps) {
-        if (![en containsObject:e.bid]) continue;
-        if (self.searchText.length > 0 &&
-            [e.name rangeOfString:self.searchText options:NSCaseInsensitiveSearch].location == NSNotFound &&
-            [e.bid  rangeOfString:self.searchText options:NSCaseInsensitiveSearch].location == NSNotFound) {
-            continue;   // v5.6：音量调节段跟随过滤词
-        }
-        PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:e.name
-            target:self set:NULL get:NULL
-            detail:[VMPVolumeController class] cell:PSLinkCell edit:nil];
-        [sp setProperty:e.bid forKey:@"bid"];
-        [sp setProperty:e.name forKey:@"appName"];
-        [specs addObject:sp];
-        linkCount++;
-    }
-    if (linkCount == 0) {
-        [specs addObject:[PSSpecifier groupSpecifierWithName:@"（暂无已启用的应用）"]];
-    }
     if (en.count == 0) {
         PSSpecifier *empty = [PSSpecifier groupSpecifierWithName:@"⚠ 空白名单 = 所有应用都不注入"];
         [empty setProperty:@"这是你自己勾选的结果；要恢复，请在上方勾选应用。" forKey:@"footerText"];

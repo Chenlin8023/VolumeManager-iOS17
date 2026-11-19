@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-# VolManAudioQueue Full 1.3.2 安装后脚本（全量包）
+# VolManAudioQueue Full 2.0.0 安装后脚本（全量包）
 #
 # 本包自带全套组件，因此不需要「停用原版再补丁」这一套：
 #   自带 → Library/MobileSubstrate/DynamicLibraries/VolumeManager.dylib        (原版·主模块)
@@ -38,6 +38,22 @@ for f in "$DL/VolumeManagerAudioQueue.dylib" \
             echo "  已移出加载路径：$(basename "$f")"
         else
             echo "  警告 — 无法移动 $(basename "$f")，它会继续被加载（可能出杂音）！"
+        fi
+    fi
+done
+
+# ── v2.0.0：清退原版闭源栈中被自研替代的组件（升级路径） ─────────────────
+#   旧面板 VolumeManagerPrefs.bundle + 旧 PreferenceLoader entry
+#     （自研 VolManPrefsPanel 替代——「旧面板解绑」= 这一步生效，respring 后双入口变单入口）
+#   原版主模块 VolumeManager.dylib（混音层已并入本包引擎 VolManAudioQueue）
+#   净化模块 VolManPrefsClean（依附旧面板；面板退役即退役）
+echo "VolManAudioQueue Full: 清退原版闭源旧组件…"
+for f in "$JB/Library/PreferenceBundles/VolumeManagerPrefs.bundle"          "$JB/Library/PreferenceLoader/Preferences/VolumeManagerPrefs.plist"          "$DL/VolumeManager.dylib" "$DL/VolumeManager.plist"          "$DL/VolManPrefsClean.dylib" "$DL/VolManPrefsClean.plist" ; do
+    if [ -e "$f" ]; then
+        if rm -rf "$f" 2>/dev/null; then
+            echo "  已清退：$(basename "$f")"
+        else
+            echo "  警告 — 清退失败（保留，可手动删）：$f"
         fi
     fi
 done
@@ -165,7 +181,7 @@ else
 fi
 
 echo ""
-echo "VolManAudioQueue Full 1.3.2: 安装完成。请执行一次 respring（注销）使改动生效。"
+echo "VolManAudioQueue Full 2.0.0: 安装完成。请执行一次 respring（注销）使改动生效。"
 echo "  日志文件：$DIR_JB/vmaq.log"
-echo "  拷贝注入的 App：重启 App 后生效（验收=容器日志头 === v1.3.1 注入）。"
+echo "  拷贝注入的 App：重启 App 后生效（验收=容器日志头 === v2.0.0 注入）。"
 exit 0

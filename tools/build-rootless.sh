@@ -58,13 +58,22 @@ build_one() {
     # 排除：旧引擎（由本次 make 重新编译）、原版有杂音的引擎
     rm -f "$DL/VolManAudioQueue.dylib" "$DL/VolManAudioQueue.plist" \
           "$DL/VolumeManagerAudioQueue.dylib" "$DL/VolumeManagerAudioQueue.plist"
+    # v2.0.0：排除原版闭源栈中已被自研替代的组件（升级残留由 postinst 清退）
+    #   旧面板 VolumeManagerPrefs.bundle + 旧 PreferenceLoader entry
+    #     （自研 VolManPrefsPanel 替代；图标仍从 orig 旧面板 bundle 取用）
+    #   原版主模块 VolumeManager.dylib（混音层已并入 VolManAudioQueue 引擎）
+    #   净化模块 VolManPrefsClean（依附旧面板，面板退役即退役）
+    rm -rf "$DST/layout/Library/PreferenceBundles/VolumeManagerPrefs.bundle"
+    rm -f  "$DST/layout/Library/PreferenceLoader/Preferences/VolumeManagerPrefs.plist"
+    rm -f  "$DL/VolumeManager.dylib" "$DL/VolumeManager.plist" \
+           "$DL/VolManPrefsClean.dylib" "$DL/VolManPrefsClean.plist"
   else
     cp -a "$DST/orig/var/jb/Library/MobileSubstrate/DynamicLibraries/VolManPrefsClean.dylib" \
           "$DST/orig/var/jb/Library/MobileSubstrate/DynamicLibraries/VolManPrefsClean.plist" "$DL/"
+    # 净化模块权限（1.2.1 的教训：dylib 必须 755，否则静默不加载）
+    chmod 755 "$DL/VolManPrefsClean.dylib"
+    chmod 644 "$DL/VolManPrefsClean.plist"
   fi
-  # 净化模块权限（1.2.1 的教训：dylib 必须 755，否则静默不加载）
-  chmod 755 "$DL/VolManPrefsClean.dylib"
-  chmod 644 "$DL/VolManPrefsClean.plist"
 
   # HUD 透明补丁模块（v2.0 步骤②；CI FAT 产物，人工下载放 hudpatch-prebuilt）
   # 缺席不阻塞构建：full 包照常出，透明补丁功能不进包（docs/05 §四.2）。
@@ -105,9 +114,9 @@ build_one() {
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>2.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>1.0.0</string>
+	<string>2.0.0</string>
 	<key>NSPrincipalClass</key>
 	<string>VMPRootListController</string>
 </dict>
