@@ -1,59 +1,37 @@
 /*
- * VMPControllers.h —— v4 架构（2026-11-19）：PSListController 壳 + 纯 UIKit 自绘内容。
+ * VMPControllers.h —— v5 架构（2026-11-19）：纯 PS 原生渲染。
  *
- * 证据链闭环：
- *   · v3 纯 UITableViewController → PS 创建后调 setRootController:（PS 家族属性）
- *     unrecognized selector 闪退 → detail 控制器必须继承 PSListController
- *   · v2 PSListController + specifier 渲染 → 三轮实验（getter 覆写/KVC ivar/
- *     setSpecifiers/截流）全部到位仍空表 → PS 的 specifier 渲染流不可见
- *   · v4 = 壳（继承提供 PS 全部机器方法）+ loadView 自绘 UITableView
- *     （自家 dataSource/delegate，PS specifier 机制全部旁路）
- * 防御性覆盖：setSpecifiers:/reloadSpecifiers/loadSpecifiersFromPlistName: →
- *   不破坏自绘表（PS 内部若触碰 specifier 机制，一律无害化）。
+ * 证据链闭环（v2→v4.4 六轮实机）：
+ *   · v3 纯 UITableViewController → setRootController: 闪退（PS 契约要求 PS 家族基类）
+ *   · v4/v4.1/v4.2 壳+自绘（loadView 替换视图）→ 导航栏半初始化搜索栏布局死循环
+ *     （hang .ips 主线程栈实锤：_UISearchBarLayout prepareBaseConfigurationForSublayout
+ *      → objc_msgSend 死循环烧 CPU）
+ *   · v2 空表真因 = specifiers 只写了自定义 ivar，基类 _specifiers 从未填充
+ *   · 闭源面板（iOS 17 实证可用）= PSListController + 代码构建 specifiers +
+ *     从不碰 loadView → PS 自己建表、自己的 delegate 方法读已填充的 ivar
+ *
+ * v5 = 该实证形态的复刻：
+ *   · 基类 PSListController，不碰 loadView/viewDidLoad 的 PS 职责（viewDidLoad 调 super）
+ *   · specifiers 构建后 KVC 写基类 _specifiers ivar（mutableCopy）
+ *   · 开关行绑 defaults 域（PS 原生读写+通知）或 get/set selector（直写文件）
+ *   · 白名单行 get/set 走 VMPWhitelistRead/Write（引擎零改动）
+ *   · 音量行 PSSliderCell get/set selector
  */
 #import "VMPShared.h"
 #import <Preferences/PSListController.h>
 #import <Preferences/PSSpecifier.h>
 #import <objc/message.h>
 
-// ── 自绘表中介（v4.1，2026-11-19）─────────────────────────────────────────
-// 铁证：自绘表 delegate=self（PSListController 子类）时，PSListController 自己
-// 实现的 UITableViewDelegate 方法（iOS 17 的 titleAlignmentForHeaderInSection
-// 等）会读它内部 specifiers 数组（空）→ NSRangeException。
-// 中介 = 纯 NSObject 实现完整协议面，转发到控制器的 vmp_* 前缀方法
-// （PS 永不实现这些名字）→ delegate 回调彻底脱离 PS 实现。
-@protocol VMPTableSource <NSObject>
-@required
-- (NSInteger)vmp_numberOfSections;
-- (NSInteger)vmp_numberOfRowsInSection:(NSInteger)section;
-- (UITableViewCell *)vmp_cellForIndexPath:(NSIndexPath *)indexPath;
-@optional
-- (NSString *)vmp_titleForHeader:(NSInteger)section;
-- (NSString *)vmp_titleForFooter:(NSInteger)section;
-- (void)vmp_didSelectRowAtIndexPath:(NSIndexPath *)indexPath;
+@interface VMPRootListController : PSListController
 @end
 
-@interface VMPTableMediator : NSObject <UITableViewDataSource, UITableViewDelegate>
-@property (nonatomic, weak) id<VMPTableSource> owner;
-@end
-
-@interface VMPRootListController : PSListController <VMPTableSource> {
-    UITableView *_vmpTable;
-}
-@end
-
-@interface VMPWhitelistController : PSListController <VMPTableSource> {
-    UITableView *_vmpTable;
-}
+@interface VMPWhitelistController : PSListController
 @property (nonatomic, strong) NSArray<VMPAppEntry *> *apps;
-@property (nonatomic, strong) NSMutableArray<NSString *> *enabled;
 @property (nonatomic, assign) BOOL scanned;
 @property (nonatomic, assign) BOOL seeding;
 @end
 
-@interface VMPVolumeController : PSListController <VMPTableSource> {
-    UITableView *_vmpTable;
-}
+@interface VMPVolumeController : PSListController
 @property (nonatomic, copy) NSString *bid;
 @property (nonatomic, copy) NSString *appName;
 @property (nonatomic, assign) double volumePercent;

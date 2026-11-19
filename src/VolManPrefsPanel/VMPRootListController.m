@@ -1,193 +1,88 @@
 /*
- * VMPRootListController.m —— 根页（v4：PSListController 壳 + 自绘表）
- * Section 0：总开关（isEnabledManagementAppVolume，引擎热轮询即时生效）
- *            启用混音（vmMixEnabled，引擎 ctor 读取，重启 App 生效）
- * Section 1：应用白名单（push VMPWhitelistController）
+ * VMPRootListController.m —— 根页（v5：PS 原生渲染）
+ * 总开关/混音开关 = defaults 域绑定（PS 原生读写 + PostNotification，零 get/set 代码）：
+ *   isEnabledManagementAppVolume —— 引擎热轮询直接吃
+ *   vmMixEnabled —— 引擎 VMMixLoadConfig 的 prefs 域候选已认（重启 App 生效）
+ * 链接行 = push 白名单页 / 音量调节页
+ * specifiers 构建后 KVC 写基类 _specifiers ivar（PS 自己的 delegate 方法读它）
  */
 #import "VMPControllers.h"
 
+static NSString * const kCellSwitch = @"PSSwitchCell";
+static NSString * const kCellLink   = @"PSLinkCell";
+static NSString * const kPrefsDomain = @"com.sunshinesong.volume-manager-prefs";
+
 @implementation VMPRootListController
 
-// PS 的 plain-init 创建路径（v2 diag 实锤：入口创建走 plain init）
 - (instancetype)init {
     if ((self = [super init])) {
-        VMPDiagHierarchy(self, @"root-plain-init");
+        VMPDiagLog(@"root v5 init");
     }
     return self;
 }
 
-// PS 契约：controllerForSpecifier: 可能走 initWithSpecifier:（无设防）
 - (instancetype)initWithSpecifier:(PSSpecifier *)specifier {
     if ((self = [super init])) {
-        VMPDiagHierarchy(self, @"root-initSpec");
+        VMPDiagLog(@"root v5 initSpec");
     }
     return self;
 }
 
-// v4 核心：loadView 自绘表（PS 的 specifier 表格完全旁路）
-- (void)loadView {
-    UITableView *tv = [[UITableView alloc] initWithFrame:CGRectZero
-                                                   style:UITableViewStyleInsetGrouped];
-    VMPTableMediator *med = [VMPTableMediator new];
-    med.owner = self;
-    tv.dataSource = med;
-    tv.delegate = med;
+- (NSMutableArray *)vmp_buildSpecifiers {
+    PSSpecifier *g1 = [PSSpecifier groupSpecifierWithName:@"音量管理"];
+    [g1 setProperty:@"总开关关闭时，所有应用的音量调整与混音全部停止。混音开关在应用下次启动时生效。"
+              forKey:@"footerText"];
 
-    tv.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    self.view = tv;
-    _vmpTable = tv;
-    // 基类的 table 属性同步指向自绘表（PS 内部若触碰则作用于自绘表）
-    @try { [self setValue:tv forKey:@"table"]; } @catch (NSException *e) { }
-    VMPDiagLog(@"root loadView: 自绘表就绪");
+    PSSpecifier *master = [PSSpecifier preferenceSpecifierNamed:@"启用音量管理"
+        target:self set:NULL get:NULL detail:nil cell:PSSwitchCell edit:nil];
+    [master setProperty:kPrefsDomain forKey:@"defaults"];
+    [master setProperty:@"isEnabledManagementAppVolume" forKey:@"key"];
+    [master setProperty:@"com.sunshinesong.volume-manager-prefs.settingOnChanged" forKey:@"PostNotification"];
+    [master setProperty:@(YES) forKey:@"default"];
+
+    PSSpecifier *mix = [PSSpecifier preferenceSpecifierNamed:@"启用混音（多应用同播）"
+        target:self set:NULL get:NULL detail:nil cell:PSSwitchCell edit:nil];
+    [mix setProperty:kPrefsDomain forKey:@"defaults"];
+    [mix setProperty:@"vmMixEnabled" forKey:@"key"];
+    [mix setProperty:@(YES) forKey:@"default"];
+
+    PSSpecifier *g2 = [PSSpecifier groupSpecifierWithName:@"应用"];
+    PSSpecifier *wl = [PSSpecifier preferenceSpecifierNamed:@"应用白名单"
+        target:self set:NULL get:NULL
+        detail:[VMPWhitelistController class] cell:kCellLink edit:nil];
+    PSSpecifier *vol = [PSSpecifier preferenceSpecifierNamed:@"音量调节"
+        target:self set:NULL get:NULL
+        detail:[VMPVolumeController class] cell:kCellLink edit:nil];
+
+    NSMutableArray *specs = [NSMutableArray arrayWithObjects:g1, master, mix, g2, wl, vol, nil];
+    VMPDiagLog(@"root v5: 构建 %lu 项", (unsigned long)specs.count);
+    return specs;
 }
 
-// ── 防御性覆盖：PS 内部触碰 specifier 机制时不破坏自绘表 ──
-- (void)setSpecifiers:(NSMutableArray *)specifiers { /* 忽略 */ }
-- (void)reloadSpecifiers { [_vmpTable reloadData]; }
-- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target bundle:(NSBundle *)bundle {
-    return [NSMutableArray new];
-}
-- (NSMutableArray *)loadSpecifiersFromPlistName:(NSString *)name target:(PSListController *)target {
-    return [NSMutableArray new];
+// 基类 ivar 为空 → 构建 + KVC 写入；非空 → 直接返回基类 ivar（PS 可能已填充）
+- (NSArray *)specifiers {
+    id cur = nil;
+    @try { cur = [self valueForKey:@"_specifiers"]; } @catch (NSException *e) { }
+    if ([cur isKindOfClass:[NSArray class]] && [(NSArray *)cur count] > 0) return cur;
+
+    NSMutableArray *specs = [self vmp_buildSpecifiers];
+    @try {
+        [self setValue:specs forKey:@"_specifiers"];
+    } @catch (NSException *e) {
+        VMPDiagLog(@"root v5: KVC _specifiers 失败: %@", e);
+    }
+    return specs;
 }
 
-// v4.2：覆盖 viewDidLoad 且不调 super——基类实现内含 PS 内部工作（上一份
-// hang .ips：主线程用户态 CPU 空转 9 秒，基类 viewDidLoad 是主线程上最后
-// 一个已确认的 PS 入口）。自绘表在 loadView 已就绪， reloadData 由本类负责。
 - (void)viewDidLoad {
-    VMPDiagLog(@"root viewDidLoad: 进入（跳过基类）");
+    [super viewDidLoad];
+    self.title = @"音量管理器";
 }
 
 - (void)viewWillAppear:(BOOL)animated {
-    VMPDiagLog(@"root viewWillAppear: super 前");
     [super viewWillAppear:animated];
-    VMPDiagLog(@"root viewWillAppear: super 后");
-    VMPDiagLog(@"root viewWillAppear: reloadData 前");
-    [_vmpTable reloadData];
-    VMPDiagLog(@"root viewWillAppear: reloadData 后");
-    // ── 挂起采栈守卫（v4.4）────────────────────────────────────────────
-    // 实测：viewWillAppear 返回后 1s 内主 runloop 被阻塞（1s 心跳从未触发），
-    // 且 hang 报告的 stackshot 两次都截断主线程栈 → 卡点不可见。
-    // 手段：主队列 1s 心跳置位；后台线程 3.5s 后检查——若心跳未触发（确认
-    // 主线程阻塞）→ abort() 主动崩溃 → 系统 crash 报告必含全部线程栈，
-    // 卡死的转圈位置从此可见。本构建为诊断构建。
-    static volatile int gRootHeartbeat = 0;
-    gRootHeartbeat = 0;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        gRootHeartbeat = 1;
-        VMPDiagLog(@"root 心跳 1s：主 runloop 存活");
-    });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        VMPDiagLog(@"root 心跳 3s：主 runloop 存活");
-    });
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
-        [NSThread sleepForTimeInterval:3.5];
-        if (!gRootHeartbeat) {
-            VMPDiagLog(@"!!! 3.5s 心跳未触发 → 主线程确认阻塞 → abort 采主线程栈");
-            abort();
-        }
-    });
-}
-
-- (void)viewDidAppear:(BOOL)animated {
-    VMPDiagLog(@"root viewDidAppear: 进入");
-    [super viewDidAppear:animated];
-    VMPDiagLog(@"root viewDidAppear: 返回");
-}
-
-#pragma mark - 数据
-
-- (NSInteger)vmp_numberOfSections {
-    return 2;
-}
-
-- (NSInteger)vmp_numberOfRowsInSection:(NSInteger)section {
-    if (section == 0) return 2;
-    return 1;
-}
-
-- (NSString *)vmp_titleForFooter:(NSInteger)section {
-    return section == 0
-        ? @"总开关关闭时，所有应用的音量调整与混音全部停止。混音开关在应用下次启动时生效。"
-        : @"勾选 = 引擎对该应用装载音量挂钩与混音；不勾 = 完全不注入。";
-}
-
-- (NSString *)vmp_titleForHeader:(NSInteger)section {
-    return section == 0 ? @"音量管理" : @"应用";
-}
-
-#pragma mark - 行
-
-- (UITableViewCell *)masterCell:(UITableView *)tv {
-    static NSString *id = @"vmpMaster";
-    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:id];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                      reuseIdentifier:id];
-        UISwitch *sw = [UISwitch new];
-        sw.onTintColor = [UIColor systemGreenColor];
-        [sw addTarget:self action:@selector(masterToggled:) forControlEvents:UIControlEventValueChanged];
-        cell.accessoryView = sw;
-    }
-    cell.textLabel.text = @"启用音量管理";
-    ((UISwitch *)cell.accessoryView).on = VMPMasterEnabledRead();
-    return cell;
-}
-
-- (UITableViewCell *)mixCell:(UITableView *)tv {
-    static NSString *id = @"vmpMix";
-    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:id];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                      reuseIdentifier:id];
-        UISwitch *sw = [UISwitch new];
-        sw.onTintColor = [UIColor systemGreenColor];
-        [sw addTarget:self action:@selector(mixToggled:) forControlEvents:UIControlEventValueChanged];
-        cell.accessoryView = sw;
-    }
-    cell.textLabel.text = @"启用混音（多应用同播）";
-    ((UISwitch *)cell.accessoryView).on = VMPMixEnabledRead();
-    return cell;
-}
-
-- (UITableViewCell *)whitelistCell:(UITableView *)tv {
-    static NSString *id = @"vmpWhitelistLink";
-    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:id];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                      reuseIdentifier:id];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-    }
-    cell.textLabel.text = @"应用白名单";
-    return cell;
-}
-
-- (void)masterToggled:(UISwitch *)sw {
-    VMPMasterEnabledWrite(sw.on);
-    VMPPostSettingChanged();
-}
-- (void)mixToggled:(UISwitch *)sw {
-    VMPMixEnabledWrite(sw.on);
-}
-
-static int vmp_cellLogs = 0;
-- (UITableViewCell *)vmp_cellForIndexPath:(NSIndexPath *)indexPath {
-    if (vmp_cellLogs < 6) {
-        VMPDiagLog(@"root cellForRow: section=%ld row=%ld", (long)indexPath.section, (long)indexPath.row);
-        vmp_cellLogs++;
-    }
-    if (indexPath.section == 0) {
-        return indexPath.row == 0 ? [self masterCell:_vmpTable] : [self mixCell:_vmpTable];
-    }
-    return [self whitelistCell:_vmpTable];
-}
-
-- (void)vmp_didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [_vmpTable deselectRowAtIndexPath:indexPath animated:YES];
-    if (indexPath.section == 1 && indexPath.row == 0) {
-        VMPWhitelistController *c = [VMPWhitelistController new];
-        [self.navigationController pushViewController:c animated:YES];
-    }
+    // 开关状态回流：PS 原生开关按 defaults 重绘（重建 cell 时回读域值）
+    [self reloadSpecifiers];
 }
 
 @end
