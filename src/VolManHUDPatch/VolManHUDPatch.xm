@@ -1,38 +1,32 @@
 /*
- * VolManHUDPatch v0.4 —— 音量面板（HUD）透明化运行时补丁（v2.0 步骤②，docs/05 §四.2）
+ * VolManHUDPatch v0.5 —— 音量面板（HUD）透明化 + 列表白名单过滤运行时补丁
  * ============================================================================
+ * v0.5 新增（2026-11-19）：HUD 列表白名单过滤（v2.0 步骤②追加需求，实机反馈：
+ *   未勾选/系统应用也出现在 HUD 滑杆列表）。RE 定案（Ghidra hud_decomp.c）：
+ *   列表重建 FUN_0000dd94 = [UIApplication.sharedApplication runningAppProcesses]
+ *   （经 FUN_00008170）→ 按 taskState==2 && isApplicationProcess 过滤 → 直接
+ *   生成滑杆行，无任何名单语义。修法 = 挂钩 runningAppProcesses，按
+ *   appwhitelist.plist 过滤返回数组：
+ *   · 三态与引擎 VMWhitelistDecide 对齐：文件缺失/无 enabled = 兼容模式 =
+ *     不过滤（老用户升级零行为变化）；fail-closed 不适用（列表过滤走 fail-open，
+ *     读不到名单绝不隐藏行）。
+ *   · 名单每次调用现读（音量键节频，无缓存）→ 面板改名单即时生效，无需重启。
+ *   · 单条 bid 取不到 → 保留该行（宁多勿崩）。
+ *   · 旁路开关 vmaq-hud-allowall = 关闭过滤。
+ *   · 预期副作用（即产品语义）：未勾选应用内按音量键，HUD 找不到该进程 →
+ *     回落系统音量条。
+ *
  * v0.4  时序修正（2026-11-18）：v0.3 实机实锤 dyld add_image 回调时 ObjC 类
  *       尚未注册（已知类清单 0/10 全部"类未注册"）——dyld 回调机制整体弃用，
  *       挂载与方法表 dump 挂靠扫描周期（类就绪后第一个 0.3s tick 自动完成，
- *       dump 不再依赖呼出 HUD；补丁关也不影响 dump）。同时修正误导日志：
- *       类未就绪时不再打出「HUD 类已加载」。透明化已实机达成（v0.2 起，
- *       用户确认磨砂消失且 0.3s 闪现无感）——扫描式为最终方案，精确挂钩
- *       仅在日后需要时借方法表实施。
+ *       dump 不再依赖呼出 HUD；补丁关也不影响 dump）。透明化已实机达成。
  * 为什么是独立模块而不是引擎分支：引擎是 arm64 单切片，SpringBoard/设置等
- * arm64e 系统进程会静默拒载（硬规则 3；2026-11-18 实测定案——中央日志从未
- * 生成过、PrefsClean 运行时层从未在设置跑过，rootless 线 dylib 只进 App 进程）。
- * 本模块必须以 FAT 双切片（arm64+arm64e）进入 SpringBoard，且必须由 Apple
- * 工具链构建（硬规则 8；本地 clang19 的 arm64e 切片过不了 PAC 关）。
+ * arm64e 系统进程会静默拒载（硬规则 3）。本模块必须以 FAT 双切片
+ * （arm64+arm64e）进入 SpringBoard，且必须由 Apple 工具链构建（硬规则 8）。
  * 构建入口 = .github/workflows/hudpatch.yml；产物人工下载到
  * tools/hudpatch-prebuilt/ 由 build-rootless.sh 打入 full 包。
- * （2026-11-18 v0.1 实机：模块被 SpringBoard 正常加载 ✅，但三个候选挂点
- *   viewDidAppear:/viewDidLoad/didMoveToWindow 全被防误伤守卫拒绝——
- *   闭源 Swift 类未覆写这些方法，补丁从未执行。v0.2 对策如下。）
  *
- * v0.2 职责（双保险）：
- *   ① 扫描式补丁（默认生效；vmaq-hud-opaque = 恢复原样）：
- *      GCD 主队列定时器 0.3s 扫描 SpringBoard 窗口，发现 VM HUD 窗口即执行
- *      清理（UIVisualEffectView 摘 effect + VM 自有类/窗口背景清透明）。
- *      零生命周期假设、必定生效；代价 = 呼出瞬间 ≤0.3s 磨砂闪现。
- *   ② 方法表 dump（开关 vmaq-hud-debug）：dyld 回调时枚举 HUD 镜像全部类
- *      与**自有**实例方法（class_copyMethodList，不含继承），为后续把扫描式
- *      换成精确挂钩提供真实可挂表面。
- *   ③ 生命周期挂钩保留尝试（viewDidAppear:/viewWillAppear:/viewDidLoad/
- *      didMoveToWindow/layoutSubviews，防误伤守卫不变）——命中则即时补丁，
- *      未命中不影响扫描式兜底。
- *
- * 日志：NSLog + 中央数据目录 vmaq-hudpatch.log + /tmp 镜像双写
- *      （SpringBoard 为 root，中央可写——这是全 rootless 线唯一真正能落中央的组件）。
+ * 日志：NSLog + 中央数据目录 vmaq-hudpatch.log + /tmp 镜像双写。
  * ============================================================================
  */
 
@@ -105,15 +99,113 @@ static void VHPLog(NSString *fmt, ...) {
 // ===========================================================================
 static int gVHPDump        = 0;   // 探针开关（vmaq-hud-debug）
 static int gVHPPatch       = 1;   // 透明化开关（默认开；vmaq-hud-opaque 关闭）
+static int gVHPFilter      = 1;   // 列表白名单过滤（v0.5 默认开；vmaq-hud-allowall 关闭）
 static IMP gOrigVCAppear   = NULL;
 static IMP gOrigVCAppearW  = NULL;
 static IMP gOrigVCLoad     = NULL;
 static IMP gOrigViewMove   = NULL;
 static IMP gOrigViewLayout = NULL;
+static IMP gOrigRunningProcs = NULL;
 static int gAttached       = 0;
+static int gFilterAttached = 0;
+static int gFilterLogCount = 0;
 static int gDumpDone       = 0;
 static dispatch_source_t gVHPSweep = nil;
 static int gVHPSweepHits   = 0;
+
+// 前向声明（v0.5 过滤块在守卫定义之前引用它）
+static IMP VHPSwizzle(Class cls, SEL sel, IMP imp);
+
+// ===========================================================================
+// v0.5 列表白名单过滤
+//   数据源 = -[UIApplication runningAppProcesses]（HUD 列表重建 FUN_0000dd94
+//   的唯一来源，经 VMProcess 助手 FUN_00008170 调用）。
+//   名单 = 数据目录 appwhitelist.plist 的 enabled 数组；文件缺失/不可解析 =
+//   兼容模式 = 不过滤（与引擎 VMWhitelistDecide 的 legacy 语义一致，老用户
+//   零行为变化）。名单每次调用现读——面板改名单即时生效。
+// ===========================================================================
+static NSArray<NSString *> *VHPWhitelistBids(NSString **outWhy) {
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        for (NSString *d in VHPDirs()) {
+            NSString *p = [d stringByAppendingPathComponent:@"appwhitelist.plist"];
+            NSDictionary *r = [NSDictionary dictionaryWithContentsOfFile:p];
+            if (![r isKindOfClass:[NSDictionary class]]) continue;
+            NSArray *en = r[@"enabled"];
+            if (![en isKindOfClass:[NSArray class]]) continue;
+            if (outWhy) *outWhy = [NSString stringWithFormat:@"%@（%lu 项）", p, (unsigned long)en.count];
+            return en;
+        }
+        if (outWhy) *outWhy = @"未初始化（无 appwhitelist.plist）→ 兼容模式不过滤";
+        return nil;
+    } @catch (NSException *e) {
+        if (outWhy) *outWhy = [NSString stringWithFormat:@"读取异常 %@ → 不过滤", e.name];
+        return nil;
+    }
+}
+
+static NSArray *VHPRunningProcsHook(id self, SEL _cmd) {
+    NSArray *orig = gOrigRunningProcs
+        ? ((NSArray *(*)(id, SEL))gOrigRunningProcs)(self, _cmd) : nil;
+    @try {
+        if (!gVHPFilter || !orig) return orig;
+        NSString *why = nil;
+        NSArray<NSString *> *bids = VHPWhitelistBids(&why);
+        if (!bids) {
+            // 兼容模式 / 读不到名单：绝不隐藏行（fail-open），只记一次原因
+            if (gFilterLogCount < 3) {
+                gFilterLogCount++;
+                VHPLog(@"runningAppProcesses 不过滤：%@", why);
+            }
+            return orig;
+        }
+        NSMutableArray *keep = [NSMutableArray array];
+        int dropped = 0;
+        for (id proc in orig) {
+            @try {
+                NSString *bid = nil;
+                if ([proc respondsToSelector:@selector(bundleIdentifier)]) {
+                    bid = [proc bundleIdentifier];
+                }
+                if (!bid.length || [bids containsObject:bid]) {
+                    [keep addObject:proc];   // bid 取不到 → 保留（宁多勿崩）
+                } else {
+                    dropped++;
+                }
+            } @catch (NSException *e) {
+                [keep addObject:proc];
+            }
+        }
+        gFilterLogCount++;
+        if (gFilterLogCount <= 3) {
+            VHPLog(@"runningAppProcesses 过滤：%lu → %lu（剔除 %d）名单=%@",
+                   (unsigned long)orig.count, (unsigned long)keep.count, dropped, why);
+        }
+        return keep;
+    } @catch (NSException *e) {
+        VHPLog(@"runningAppProcesses 过滤异常: %@", e);
+        return orig;
+    }
+}
+
+// UIApplication 是 Apple 常驻类，ctor 后必已注册——独立于 HUD 类的挂载时机，
+// 挂靠同一扫描周期（主队列 tick），挂一次即止。
+static void VHPAttachFilter(void) {
+    if (gFilterAttached) return;
+    Class ui = objc_getClass("UIApplication");
+    if (!ui) return;   // 理论不可达（SpringBoard 有 UIKit），等下个 tick
+    IMP o = VHPSwizzle(ui, @selector(runningAppProcesses), (IMP)&VHPRunningProcsHook);
+    if (o) {
+        gOrigRunningProcs = o;
+        gFilterAttached = 1;
+        VHPLog(@"已挂 UIApplication runningAppProcesses（列表过滤=%d）", gVHPFilter);
+    } else {
+        // 防误伤守卫拒绝（方法非 UIApplication 自有实现）——记日志并放弃，
+        // 透明化扫描式不受影响。
+        gFilterAttached = 1;
+        VHPLog(@"runningAppProcesses 挂钩被守卫拒绝（非自有实现）→ 过滤不生效");
+    }
+}
 
 // ===========================================================================
 // 手动挂钩（防误伤守卫：方法必须由类自身实现，继承来的拒绝——
@@ -224,6 +316,9 @@ static void VHPStartSweep(void) {
                               (uint64_t)(0.3 * NSEC_PER_SEC), 0);
     dispatch_source_set_event_handler(gVHPSweep, ^{
         @try {
+            // v0.5：列表过滤挂钩独立挂载（UIApplication 常驻，首个 tick 即完成）
+            VHPAttachFilter();
+
             // v0.4：挂载与方法表 dump 挂靠扫描周期——HUD 类注册完成后的
             // 第一个 tick 自动完成（dyld add_image 回调时 ObjC 类尚未注册，
             // v0.3 实机 0/10 实锤）。补丁关（vmaq-hud-opaque）也不影响 dump。
@@ -387,14 +482,15 @@ static void VHPAttach(void) {
 
         gVHPDump  = VHPFilePresent(@"vmaq-hud-debug");
         if (VHPFilePresent(@"vmaq-hud-opaque")) gVHPPatch = 0;
+        if (VHPFilePresent(@"vmaq-hud-allowall")) gVHPFilter = 0;
 
-        VHPLog(@"注入 pid=%d 透明补丁=%d dump探针=%d（补丁=扫描式0.3s）",
+        VHPLog(@"注入 pid=%d 透明补丁=%d 列表过滤=%d dump探针=%d（补丁=扫描式0.3s）",
                (int)[[NSProcessInfo processInfo] processIdentifier],
-               gVHPPatch, gVHPDump);
+               gVHPPatch, gVHPFilter, gVHPDump);
 
-        // 扫描周期承担三件事：挂载（类就绪后）→ 方法表 dump（开关开时）→
-        // 窗口清理（补丁开时）。主队列启动（UIKit 访问必须在主线程）。
-        if (gVHPPatch || gVHPDump) {
+        // 扫描周期承担四件事：过滤挂钩（首个 tick）→ 挂载（类就绪后）→
+        // 方法表 dump（开关开时）→ 窗口清理（补丁开时）。主队列启动。
+        if (gVHPPatch || gVHPDump || gVHPFilter) {
             dispatch_async(dispatch_get_main_queue(), ^{ VHPStartSweep(); });
         }
     }
