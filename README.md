@@ -6,7 +6,24 @@
 > 已在 **iPhone 15 Pro / iOS 17.2.1 / Rootless 越狱** 实测通过：
 > 不进安全模式、无杂音、多 App 同时播放正常、每个 App 的音量单独生效且即时刷新。
 
-**当前版本：v1.3.4**
+**当前版本：v2.0.4（音量管理器）**
+
+## v2.0 大版本（2026-11-19）——自研面板 + 应用白名单 + HUD 过滤
+
+- **自研设置面板**（`VolManPrefsPanel`，PS 原生渲染）整体替换闭源面板；
+  原版闭源面板 / 主模块 / 净化模块全部退役，**安装时自动清退**（respring 后设置内单入口）。
+- **应用白名单**：未勾选 = 完全不注入（无渲染挂钩、无 0.5s 轮询），引擎 ctor 三态裁决；
+  白名单页搜索栏 + 应用/系统组件两段分组；改动需重启对应 App 生效（裁决为进程启动时一次性）。
+- **音量 HUD 白名单过滤**（`VolManHUDPatch`）：滑杆列表仅显示白名单应用
+  （挂钩 `AXSpringBoardServer runningAppProcesses`，名单缓存 + settingOnChanged 通知失效）；
+  未勾选应用按音量键回落系统音量条。
+- **总开关 / 混音开关实时生效**：文件通道 + Darwin 通知热刷新（对闭源栈通知机制的 RE 定案）。
+- **混音层恢复全局 + 无条件 `MixWithOthers`**：白名单收窄会破坏混音（混音需两端 mixable），
+  条件式改写存在时序竞态（先启动 App 非 mixable → 被后启动方掐断）。
+- 显示名改为**音量管理器**（Package id `com.local.volmanaudioqueue.full` 不变，升级链不断）。
+- **已知限制**：部分沙盒 App 中央配置不可达（红果短剧 / 汽水音乐类）——这些 App 无音量调节，
+  与白名单 App 同播时可能被掐断；混音层全局生效不受影响。
+- 紧急恢复：数据目录放空文件 `vmaq-hud-allowall` = 关闭 HUD 白名单过滤（respring 生效）。
 
 ## 本版修复（v1.3.1 → v1.3.4）
 
@@ -81,6 +98,9 @@ v1.1.1 变更：
   Preferences 同步副本等多条路径，并正确绕开 libroot 对 `stat()` 的参数改写陷阱。
 * **三重刷新机制** —— 监听全部 3 个通知 + 0.5 秒文件时间戳轮询兜底 + 备用层（AVPlayer /
   AVAudioPlayer / AVSampleBufferAudioRenderer）基准音量回写，做到改完即生效。
+
+> 以下净化模块与原版面板架构为 **v1.x 历史设计**；v2.0 起闭源面板已退役，
+> 全量包不再包含 `VolManPrefsClean` 与原版组件（源码保留、patch 包仍可构建）。
 
 另外还附带一个 **设置面板净化模块**（`VolManPrefsClean`），两层实现：
 
@@ -171,8 +191,9 @@ docs/
 * **补丁包**（`com.local.volmanaudioqueue`）—— 只装重写后的音量引擎和净化模块，
   适合**已经装了原版 VolumeManager** 的设备。安装后会把原版有杂音的音量模块改名停用，
   卸载时自动还原。
-* **全量包**（`com.local.volmanaudioqueue.full`）—— 自带全套组件（原版主模块、音量 HUD、
-  设置面板 + 重写的音量引擎 + 净化模块），适合**全新安装**，一个 deb 解决。
+* **全量包**（`com.local.volmanaudioqueue.full`）—— **v2.0 起不再包含任何原版闭源组件**：
+  自研面板 + 音量 HUD（原版闭源，透明化/白名单过滤由 VolManHUDPatch 补丁）+ 重写的音量引擎，
+  适合**全新安装**，一个 deb 解决。
 
 两个包里的 `VolManAudioQueue.dylib` 是同一份代码，md5 一致。
 
