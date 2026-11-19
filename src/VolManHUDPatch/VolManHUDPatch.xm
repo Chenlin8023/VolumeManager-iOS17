@@ -1,25 +1,20 @@
 /*
- * VolManHUDPatch v0.5 —— 音量面板（HUD）透明化 + 列表白名单过滤运行时补丁
+ * VolManHUDPatch v0.6 —— 音量面板（HUD）透明化 + 列表白名单过滤运行时补丁
  * ============================================================================
- * v0.5 新增（2026-11-19）：HUD 列表白名单过滤（v2.0 步骤②追加需求，实机反馈：
- *   未勾选/系统应用也出现在 HUD 滑杆列表）。RE 定案（Ghidra hud_decomp.c）：
- *   列表重建 FUN_0000dd94 = [UIApplication.sharedApplication runningAppProcesses]
- *   （经 FUN_00008170）→ 按 taskState==2 && isApplicationProcess 过滤 → 直接
- *   生成滑杆行，无任何名单语义。修法 = 挂钩 runningAppProcesses，按
- *   appwhitelist.plist 过滤返回数组：
- *   · 三态与引擎 VMWhitelistDecide 对齐：文件缺失/无 enabled = 兼容模式 =
- *     不过滤（老用户升级零行为变化）；fail-closed 不适用（列表过滤走 fail-open，
- *     读不到名单绝不隐藏行）。
- *   · 名单每次调用现读（音量键节频，无缓存）→ 面板改名单即时生效，无需重启。
- *   · 单条 bid 取不到 → 保留该行（宁多勿崩）。
- *   · 旁路开关 vmaq-hud-allowall = 关闭过滤。
- *   · 预期副作用（即产品语义）：未勾选应用内按音量键，HUD 找不到该进程 →
- *     回落系统音量条。
+ * v0.6 事故修正（2026-11-19 晚）：rc1（含 v0.5b AX 挂钩）实机全链路失效
+ *   （HUD 不弹/音量键无响应/mix 链路断）。v0.5b 的过滤 hook 每次
+ *   runningAppProcesses 调用都读三处白名单文件——AXSpringBoardServer 被系统
+ *   高频轮询时即 I/O 风暴拖死 SpringBoard。v0.6 = 名单缓存 + settingOnChanged
+ *   通知失效（AX 调用路径零文件 I/O）。诊断手段：数据目录放 vmaq-hud-allowall
+ *   空文件 = 关过滤旁路（respring 生效），HUD 恢复即实锤挂钩问题。
  *
- * v0.4  时序修正（2026-11-18）：v0.3 实机实锤 dyld add_image 回调时 ObjC 类
- *       尚未注册（已知类清单 0/10 全部"类未注册"）——dyld 回调机制整体弃用，
- *       挂载与方法表 dump 挂靠扫描周期（类就绪后第一个 0.3s tick 自动完成，
- *       dump 不再依赖呼出 HUD；补丁关也不影响 dump）。透明化已实机达成。
+ * v0.5b 过滤目标修正：receiver=AXSpringBoardServer（AccessibilityUtilities；
+ *   runningAppProcesses 与 applicationWithIdentifier 两入口同源），
+ *   v0.5a 挂 UIApplication=死代码。v0.5b 实机验证过滤生效（"确实过滤了
+ *   非白名单应用"）。
+ *
+ * v0.4  时序修正（2026-11-18）：dyld add_image 回调时 ObjC 类尚未注册——
+ *       挂载与方法表 dump 挂靠扫描周期。透明化扫描式 0.3s 为主力。
  * 为什么是独立模块而不是引擎分支：引擎是 arm64 单切片，SpringBoard/设置等
  * arm64e 系统进程会静默拒载（硬规则 3）。本模块必须以 FAT 双切片
  * （arm64+arm64e）进入 SpringBoard，且必须由 Apple 工具链构建（硬规则 8）。
@@ -117,32 +112,59 @@ static int gVHPSweepHits   = 0;
 static IMP VHPSwizzle(Class cls, SEL sel, IMP imp);
 
 // ===========================================================================
-// v0.5 列表白名单过滤
-//   数据源 = -[AXSpringBoardServer runningAppProcesses]（HUD 列表重建
-//   FUN_0000dd94 的唯一来源，经 VMProcess 助手 FUN_00008170 调用；
-//   v0.5 实机反馈过滤无效后复核反编译定案：receiver 是 AXSpringBoardServer
-//   （AccessibilityUtilities），**不是** UIApplication——v0.5a 挂错类=死代码，
-//   v0.5b 修正）。同 server 的 applicationWithIdentifier:（FUN_000082e0，
-//   按 bid 查前台应用）不挂钩——只过滤列表内容，不动 HUD 的显示判定。
-//   名单 = 数据目录 appwhitelist.plist 的 enabled 数组；文件缺失/不可解析 =
-//   兼容模式 = 不过滤（与引擎 VMWhitelistDecide 的 legacy 语义一致，老用户
-//   零行为变化）。名单每次调用现读——面板改名单即时生效。
+// v0.6 关键修正（2026-11-19 晚，rc1 实机全链路失效事故）：v0.5b 的过滤 hook
+// **每次 runningAppProcesses 调用都读三处白名单文件**——AXSpringBoardServer 若被
+// 系统/AX 栈高频轮询，就是把 SpringBoard 拖死的 I/O 风暴（症状=HUD 不弹、音量
+// 键无响应、mix 测试链路全断）。v0.6 改为**缓存 + 通知失效**（镜像 HUD 自己的
+// VMPrefs 模式）：名单只在首次调用读一次，收到 settingOnChanged Darwin 通知
+// 才失效，下一次调用重读。AX 调用路径零文件 I/O。
+//   数据源 = -[AXSpringBoardServer runningAppProcesses]（FUN_00008170）
+//   名单 = appwhitelist.plist 的 enabled 数组；文件缺失/不可解析 = 兼容模式 =
+//   不过滤（与引擎三态对齐）；旁路开关 vmaq-hud-allowall 保留。
 // ===========================================================================
-static NSArray<NSString *> *VHPWhitelistBids(NSString **outWhy) {
+static NSArray<NSString *> *gVHPBidsCache = nil;   // nil 且 loaded=YES = 兼容模式（读过了但没名单）
+static BOOL gVHPBidsLoaded = NO;
+static BOOL gVHPBidsCompat = NO;                   // 上次读取是否兼容模式（日志去重用）
+
+static void VHPWhitelistInvalidate(void) {
+    gVHPBidsLoaded = NO;
+    gVHPBidsCache = nil;
+}
+
+static void VHPSettingChangedCB(CFNotificationCenterRef center, void *observer,
+                                CFStringRef name, const void *object,
+                                CFDictionaryRef userInfo) {
+    VHPWhitelistInvalidate();
+}
+
+static NSArray<NSString *> *VHPWhitelistBidsCached(void) {
     @try {
+        if (gVHPBidsLoaded) return gVHPBidsCache;
+        NSString *why = nil;
+        NSArray<NSString *> *bids = nil;
         for (NSString *d in VHPDirs()) {
-            NSString *p = [d stringByAppendingPathComponent:@"appwhitelist.plist"];
-            NSDictionary *r = [NSDictionary dictionaryWithContentsOfFile:p];
+            NSDictionary *r = [NSDictionary dictionaryWithContentsOfFile:
+                               [d stringByAppendingPathComponent:@"appwhitelist.plist"]];
             if (![r isKindOfClass:[NSDictionary class]]) continue;
             NSArray *en = r[@"enabled"];
             if (![en isKindOfClass:[NSArray class]]) continue;
-            if (outWhy) *outWhy = [NSString stringWithFormat:@"%@（%lu 项）", p, (unsigned long)en.count];
-            return en;
+            bids = en;
+            why = [NSString stringWithFormat:@"%@（%lu 项）", d, (unsigned long)en.count];
+            break;
         }
-        if (outWhy) *outWhy = @"未初始化（无 appwhitelist.plist）→ 兼容模式不过滤";
-        return nil;
+        gVHPBidsCache = bids;
+        gVHPBidsLoaded = YES;
+        if (bids) {
+            VHPLog(@"名单缓存加载：%@", why);
+        } else if (!gVHPBidsCompat) {
+            gVHPBidsCompat = YES;
+            VHPLog(@"名单不可读（文件缺失/不可解析）→ 兼容模式不过滤（缓存至通知）");
+        }
+        return gVHPBidsCache;
     } @catch (NSException *e) {
-        if (outWhy) *outWhy = [NSString stringWithFormat:@"读取异常 %@ → 不过滤", e.name];
+        VHPLog(@"名单缓存读取异常: %@", e);
+        gVHPBidsLoaded = YES;
+        gVHPBidsCache = nil;
         return nil;
     }
 }
@@ -152,15 +174,9 @@ static NSArray *VHPRunningProcsHook(id self, SEL _cmd) {
         ? ((NSArray *(*)(id, SEL))gOrigRunningProcs)(self, _cmd) : nil;
     @try {
         if (!gVHPFilter || !orig) return orig;
-        NSString *why = nil;
-        NSArray<NSString *> *bids = VHPWhitelistBids(&why);
+        NSArray<NSString *> *bids = VHPWhitelistBidsCached();   // v0.6：缓存，零文件 I/O
         if (!bids) {
-            // 兼容模式 / 读不到名单：绝不隐藏行（fail-open），只记一次原因
-            if (gFilterLogCount < 3) {
-                gFilterLogCount++;
-                VHPLog(@"runningAppProcesses 不过滤：%@", why);
-            }
-            return orig;
+            return orig;   // 兼容模式（首次进入时已记日志）
         }
         NSMutableArray *keep = [NSMutableArray array];
         int dropped = 0;
@@ -181,8 +197,9 @@ static NSArray *VHPRunningProcsHook(id self, SEL _cmd) {
         }
         gFilterLogCount++;
         if (gFilterLogCount <= 3) {
-            VHPLog(@"runningAppProcesses 过滤：%lu → %lu（剔除 %d）名单=%@",
-                   (unsigned long)orig.count, (unsigned long)keep.count, dropped, why);
+            VHPLog(@"runningAppProcesses 过滤：%lu → %lu（剔除 %d，名单 %lu 项）",
+                   (unsigned long)orig.count, (unsigned long)keep.count, dropped,
+                   (unsigned long)bids.count);
         }
         return keep;
     } @catch (NSException *e) {
@@ -194,6 +211,8 @@ static NSArray *VHPRunningProcsHook(id self, SEL _cmd) {
 // v0.5b：挂 AXSpringBoardServer（HUD 实际使用的进程源）。AX 类在 SpringBoard
 // 常驻（辅助功能基础设施），扫描周期首个 tick 即注册；未就绪时静默等待 +
 // 有限日志（硬规则：静默失败必须留日志）。
+// v0.6：挂上后同时注册 settingOnChanged 观察者驱动名单缓存失效（镜像 HUD 的
+// VMPrefs 模式——面板改名单 → 面板发通知 → 缓存失效 → 下次调用重读）。
 static int gVHPFilterProbeLogs = 0;
 static void VHPAttachFilter(void) {
     if (gFilterAttached) return;
@@ -210,7 +229,14 @@ static void VHPAttachFilter(void) {
     if (o) {
         gOrigRunningProcs = o;
         gFilterAttached = 1;
-        VHPLog(@"已挂 AXSpringBoardServer runningAppProcesses（列表过滤=%d）", gVHPFilter);
+        // 名单缓存失效观察者（Darwin 通知；面板每次写开关后都会发）
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+            &VHPSettingChangedCB,
+            CFSTR("com.sunshinesong.volume-manager-prefs.settingOnChanged"),
+            NULL, CFNotificationSuspensionBehaviorCoalesce);
+        VHPLog(@"已挂 AXSpringBoardServer runningAppProcesses（列表过滤=%d，名单缓存=通知失效）",
+               gVHPFilter);
     } else {
         // 防误伤守卫拒绝（方法非该类自有实现）——记日志并放弃，
         // 透明化扫描式不受影响。
