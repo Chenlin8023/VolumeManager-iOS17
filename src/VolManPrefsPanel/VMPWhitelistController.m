@@ -8,9 +8,6 @@
  */
 #import "VMPControllers.h"
 
-static NSString * const kCellSwitch = @"PSSwitchCell";
-static NSString * const kCellLink   = @"PSLinkCell";
-static NSString * const kCellGroup  = @"PSGroupCell";
 
 @implementation VMPWhitelistController
 
@@ -109,7 +106,7 @@ static NSString * const kCellGroup  = @"PSGroupCell";
         PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:title
             target:self set:@selector(setInjectValue:forSpecifier:)
             get:@selector(injectValueForSpecifier:)
-            detail:nil cell:kCellSwitch edit:nil];
+            detail:nil cell:PSSwitchCell edit:nil];
         [sp setProperty:e.bid forKey:@"bid"];
         if (e.icon) [sp setProperty:e.icon forKey:@"icon"];
         [specs addObject:sp];
@@ -125,7 +122,7 @@ static NSString * const kCellGroup  = @"PSGroupCell";
         if (![en containsObject:e.bid]) continue;
         PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:e.name
             target:self set:NULL get:NULL
-            detail:[VMPVolumeController class] cell:kCellLink edit:nil];
+            detail:[VMPVolumeController class] cell:PSLinkCell edit:nil];
         [sp setProperty:e.bid forKey:@"bid"];
         [sp setProperty:e.name forKey:@"appName"];
         [specs addObject:sp];

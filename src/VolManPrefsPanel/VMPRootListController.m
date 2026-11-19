@@ -8,8 +8,6 @@
  */
 #import "VMPControllers.h"
 
-static NSString * const kCellSwitch = @"PSSwitchCell";
-static NSString * const kCellLink   = @"PSLinkCell";
 static NSString * const kPrefsDomain = @"com.sunshinesong.volume-manager-prefs";
 
 @implementation VMPRootListController
@@ -49,10 +47,10 @@ static NSString * const kPrefsDomain = @"com.sunshinesong.volume-manager-prefs";
     PSSpecifier *g2 = [PSSpecifier groupSpecifierWithName:@"应用"];
     PSSpecifier *wl = [PSSpecifier preferenceSpecifierNamed:@"应用白名单"
         target:self set:NULL get:NULL
-        detail:[VMPWhitelistController class] cell:kCellLink edit:nil];
+        detail:[VMPWhitelistController class] cell:PSLinkCell edit:nil];
     PSSpecifier *vol = [PSSpecifier preferenceSpecifierNamed:@"音量调节"
         target:self set:NULL get:NULL
-        detail:[VMPVolumeController class] cell:kCellLink edit:nil];
+        detail:[VMPVolumeController class] cell:PSLinkCell edit:nil];
 
     NSMutableArray *specs = [NSMutableArray arrayWithObjects:g1, master, mix, g2, wl, vol, nil];
     VMPDiagLog(@"root v5: 构建 %lu 项", (unsigned long)specs.count);

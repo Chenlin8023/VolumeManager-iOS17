@@ -7,7 +7,6 @@
  */
 #import "VMPControllers.h"
 
-static NSString * const kCellSlider = @"PSSliderCell";
 
 @implementation VMPVolumeController
 
@@ -41,7 +40,7 @@ static NSString * const kCellSlider = @"PSSliderCell";
     PSSpecifier *slider = [PSSpecifier preferenceSpecifierNamed:@"音量"
         target:self set:@selector(setVolumeValue:forSpecifier:)
         get:@selector(volumeValueForSpecifier:)
-        detail:nil cell:kCellSlider edit:nil];
+        detail:nil cell:PSSliderCell edit:nil];
     [slider setProperty:@(0) forKey:@"min"];
     [slider setProperty:@(100) forKey:@"max"];
     [slider setProperty:@(self.volumePercent) forKey:@"default"];
