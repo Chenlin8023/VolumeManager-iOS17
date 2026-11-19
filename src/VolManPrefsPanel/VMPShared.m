@@ -40,57 +40,57 @@ BOOL VMPWritePlist(id plist, NSString *path) {
     }
 }
 
-#pragma mark - 总开关
+#pragma mark - 总开关（v5.3：CFPreferences 通道——直写文件会被 cfprefsd 域缓存回冲覆盖，实机踩坑：新面板开关"无效"）
+
+static NSString * const kSunDomainCF = @"com.sunshinesong.volume-manager-prefs";
 
 BOOL VMPMasterEnabledRead(void) {
     @try {
-        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:VMPSunPrefsPath()];
-        id v = d[@"isEnabledManagementAppVolume"];
-        return [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : YES;
+        CFTypeRef v = CFPreferencesCopyAppValue(
+            CFSTR("isEnabledManagementAppVolume"),
+            (__bridge CFStringRef)kSunDomainCF);
+        if (!v) return YES;
+        BOOL r = [(__bridge NSNumber *)v respondsToSelector:@selector(boolValue)]
+                 ? [(__bridge NSNumber *)v boolValue] : YES;
+        CFRelease(v);
+        return r;
     } @catch (NSException *e) { return YES; }
 }
 
 BOOL VMPMasterEnabledWrite(BOOL enabled) {
     @try {
-        NSMutableDictionary *d = [[NSDictionary dictionaryWithContentsOfFile:VMPSunPrefsPath()]
-                                  mutableCopy] ?: [NSMutableDictionary dictionary];
-        d[@"isEnabledManagementAppVolume"] = @(enabled);
-        return VMPWritePlist(d, VMPSunPrefsPath());
+        CFPreferencesSetAppValue(CFSTR("isEnabledManagementAppVolume"),
+                                 (__bridge CFTypeRef)(@(enabled)),
+                                 (__bridge CFStringRef)kSunDomainCF);
+        CFPreferencesAppSynchronize((__bridge CFStringRef)kSunDomainCF);
+        return YES;
     } @catch (NSException *e) { return NO; }
 }
 
-#pragma mark - 混音
+#pragma mark - 混音（v5.3：CFPreferences 双 key——vmMixEnabled 引擎 + isEnabledMixable 闭源 HUD）
 
 BOOL VMPMixEnabledRead(void) {
     @try {
-        for (NSString *p in @[ VMPMixDataPath(), VMPMixSyncedPath() ]) {
-            NSDictionary *r = [NSDictionary dictionaryWithContentsOfFile:p];
-            if (![r isKindOfClass:[NSDictionary class]]) continue;
-            if (r[@"vmMixEnabled"]) return [r[@"vmMixEnabled"] boolValue];
-        }
-        return YES;   // 无配置 = 默认开（与引擎默认一致）
+        CFTypeRef v = CFPreferencesCopyAppValue(
+            CFSTR("vmMixEnabled"), (__bridge CFStringRef)kSunDomainCF);
+        if (!v) return YES;
+        BOOL r = [(__bridge NSNumber *)v respondsToSelector:@selector(boolValue)]
+                 ? [(__bridge NSNumber *)v boolValue] : YES;
+        CFRelease(v);
+        return r;
     } @catch (NSException *e) { return YES; }
 }
 
-// v5.2：混音写入双写——引擎侧 vmMixEnabled（mixInfo/Preferences mix）+
-// 闭源 HUD 侧 isEnabledMixable（sunshinesong prefs 域：HUD 弹出条件读它，
-// 旧面板多元化开关写的就是这个 key；不同步则 HUD 停弹，实机踩坑）
 BOOL VMPMixEnabledWrite(BOOL enabled) {
     @try {
-        BOOL ok = YES;
-        for (NSString *p in @[ VMPMixDataPath(), VMPMixSyncedPath() ]) {
-            NSMutableDictionary *d = [[NSDictionary dictionaryWithContentsOfFile:p] mutableCopy]
-                                     ?: [NSMutableDictionary dictionary];
-            d[@"vmMixEnabled"] = @(enabled);
-            if (![d writeToFile:p atomically:YES]) ok = NO;
-        }
-        // 闭源 HUD/旧面板一致性：isEnabledMixable（sunshinesong prefs 域）
-        NSString *sun = VMPSunPrefsPath();
-        NSMutableDictionary *sd = [[NSDictionary dictionaryWithContentsOfFile:sun] mutableCopy]
-                                  ?: [NSMutableDictionary dictionary];
-        sd[@"isEnabledMixable"] = @(enabled);
-        if (![sd writeToFile:sun atomically:YES]) ok = NO;
-        return ok;
+        CFPreferencesSetAppValue(CFSTR("vmMixEnabled"),
+                                 (__bridge CFTypeRef)(@(enabled)),
+                                 (__bridge CFStringRef)kSunDomainCF);
+        CFPreferencesSetAppValue(CFSTR("isEnabledMixable"),
+                                 (__bridge CFTypeRef)(@(enabled)),
+                                 (__bridge CFStringRef)kSunDomainCF);
+        CFPreferencesAppSynchronize((__bridge CFStringRef)kSunDomainCF);
+        return YES;
     } @catch (NSException *e) { return NO; }
 }
 
