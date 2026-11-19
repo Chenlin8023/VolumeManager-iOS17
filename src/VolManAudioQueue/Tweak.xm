@@ -997,6 +997,15 @@ static OSStatus VMRenderCB(void *inRefCon,
 //     ④ 私有 API 全部 class_getInstanceMethod 探测，不存在就不挂。
 //     ⑤ 不用 libSparkAppList（240KB + SpringBoard 注入），排除表自己读 plist。
 //
+//   v2.0.3 修正（2026-11-19 晚，实机矩阵）：setCategory 系列的原「仅当
+//     VMMixOtherPlaying() 才加 Mix」条件存在时序竞态——先启动的 App 在无人
+//     放音时设类别 → 不加 Mix → 非 mixable，后启动方激活即掐断它（抖音↔
+//     QQ阅读 相互掐断根因）。1.3.x 时代由原版主模块的无条件改写盖住此坑，
+//     主模块退役后暴露。现改为：混音层开启即**无条件**加 MixWithOthers
+//     （= 原版面板「无影响」语义），类别归一化照旧（SoloAmbient/Ambient/
+//     Ringtone → Playback）。VMMixOtherPlaying 保留在 setActive 前置改写/
+//     isPrimary/silenceOutput 三处（补漏性质，无害）。
+//
 //   配置（任选一处，找不到就用默认值）：
 //     <数据目录>/mixInfo.plist
 //     /var/mobile/Library/Preferences/com.local.volmanaudioqueue.mix.plist
@@ -1225,19 +1234,19 @@ static BOOL vm_mix_setActive(id self, SEL _cmd, BOOL active, NSUInteger options,
 
 static BOOL vm_mix_setCategoryError(id self, SEL _cmd, NSString *cat, NSError **error) {
     if (VMMixConfigActive()) {
-        // setCategory:error: 等价于默认 mode + 默认 options
-        VMMixRemember(cat, AVAudioSessionModeDefault, 0, 0);
-        if (VMMixOtherPlaying()) {
-            NSString *n = VMMixNormalizeCategory(cat);
-            VMMixRemember(n, AVAudioSessionModeDefault, 0, AVAudioSessionCategoryOptionMixWithOthers);
-            if (vm_orig_setCatOpts) {
-                if (gMixActCount < 60) {
-                    gMixActCount++;
-                    VMLog(@"[mix] setCategory:error: 改写 %@ → %@ + Mix", cat, n);
-                }
-                return vm_orig_setCatOpts(self, @selector(setCategory:withOptions:error:),
-                                          n, AVAudioSessionCategoryOptionMixWithOthers, error);
-            }
+        // v2.0.3：无条件加 Mix（去掉 VMMixOtherPlaying 条件）——条件式改写存在
+        // 时序竞态：先启动的 App 在无人放音时设类别 → 不加 Mix → 非 mixable，
+        // 后启动方激活即掐断它（抖音↔QQ阅读 相互掐断的根因）。1.3.x 时代由
+        // 原版主模块的无条件改写盖住此坑，主模块退役后暴露。无影响=恒定 mixable。
+        NSString *n = VMMixNormalizeCategory(cat);
+        VMMixRemember(n, AVAudioSessionModeDefault, 0, AVAudioSessionCategoryOptionMixWithOthers);
+        if (gMixActCount < 60) {
+            gMixActCount++;
+            VMLog(@"[mix] setCategory:error: 改写 %@ → %@ + Mix", cat, n);
+        }
+        if (vm_orig_setCatOpts) {
+            return vm_orig_setCatOpts(self, @selector(setCategory:withOptions:error:),
+                                      n, AVAudioSessionCategoryOptionMixWithOthers, error);
         }
     }
     return vm_orig_setCatErr ? vm_orig_setCatErr(self, _cmd, cat, error) : NO;
@@ -1246,18 +1255,15 @@ static BOOL vm_mix_setCategoryError(id self, SEL _cmd, NSString *cat, NSError **
 static BOOL vm_mix_setCategoryOptions(id self, SEL _cmd, NSString *cat,
                                       NSUInteger options, NSError **error) {
     if (VMMixConfigActive()) {
-        VMMixRemember(cat, AVAudioSessionModeDefault, 0, options);
-        if (VMMixOtherPlaying()) {
-            NSString *n = VMMixNormalizeCategory(cat);
-            NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
-            VMMixRemember(n, AVAudioSessionModeDefault, 0, o);
-            if (gMixActCount < 60) {
-                gMixActCount++;
-                VMLog(@"[mix] setCategory:withOptions: 改写 %@/%lu → %@/%lu", cat,
-                      (unsigned long)options, n, (unsigned long)o);
-            }
-            if (vm_orig_setCatOpts) return vm_orig_setCatOpts(self, _cmd, n, o, error);
+        NSString *n = VMMixNormalizeCategory(cat);
+        NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
+        VMMixRemember(n, AVAudioSessionModeDefault, 0, o);
+        if (gMixActCount < 60) {
+            gMixActCount++;
+            VMLog(@"[mix] setCategory:withOptions: 改写 %@/%lu → %@/%lu", cat,
+                  (unsigned long)options, n, (unsigned long)o);
         }
+        if (vm_orig_setCatOpts) return vm_orig_setCatOpts(self, _cmd, n, o, error);
     }
     return vm_orig_setCatOpts ? vm_orig_setCatOpts(self, _cmd, cat, options, error) : NO;
 }
@@ -1265,13 +1271,10 @@ static BOOL vm_mix_setCategoryOptions(id self, SEL _cmd, NSString *cat,
 static BOOL vm_mix_setCategoryMode(id self, SEL _cmd, NSString *cat, NSString *mode,
                                    NSUInteger options, NSError **error) {
     if (VMMixConfigActive()) {
-        VMMixRemember(cat, mode, 0, options);
-        if (VMMixOtherPlaying()) {
-            NSString *n = VMMixNormalizeCategory(cat);
-            NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
-            VMMixRemember(n, mode, 0, o);
-            if (vm_orig_setCatMode) return vm_orig_setCatMode(self, _cmd, n, mode, o, error);
-        }
+        NSString *n = VMMixNormalizeCategory(cat);
+        NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
+        VMMixRemember(n, mode, 0, o);
+        if (vm_orig_setCatMode) return vm_orig_setCatMode(self, _cmd, n, mode, o, error);
     }
     return vm_orig_setCatMode ? vm_orig_setCatMode(self, _cmd, cat, mode, options, error) : NO;
 }
@@ -1279,14 +1282,11 @@ static BOOL vm_mix_setCategoryMode(id self, SEL _cmd, NSString *cat, NSString *m
 static BOOL vm_mix_setCategoryModePolicy(id self, SEL _cmd, NSString *cat, NSString *mode,
                                          NSUInteger policy, NSUInteger options, NSError **error) {
     if (VMMixConfigActive()) {
-        VMMixRemember(cat, mode, policy, options);
-        if (VMMixOtherPlaying()) {
-            NSString *n = VMMixNormalizeCategory(cat);
-            NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
-            VMMixRemember(n, mode, policy, o);
-            if (vm_orig_setCatModePolicy) {
-                return vm_orig_setCatModePolicy(self, _cmd, n, mode, policy, o, error);
-            }
+        NSString *n = VMMixNormalizeCategory(cat);
+        NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
+        VMMixRemember(n, mode, policy, o);
+        if (vm_orig_setCatModePolicy) {
+            return vm_orig_setCatModePolicy(self, _cmd, n, mode, policy, o, error);
         }
     }
     return vm_orig_setCatModePolicy
@@ -1303,13 +1303,10 @@ static BOOL vm_mix_setMode(id self, SEL _cmd, NSString *mode, NSError **error) {
 static BOOL vm_mix_privSetOptions(id self, SEL _cmd, NSUInteger options,
                                   NSString *cat, NSError **error) {
     if (VMMixConfigActive()) {
-        VMMixRemember(cat, VMMixCachedMode(), VMMixCachedPolicy(), options);
-        if (VMMixOtherPlaying()) {
-            NSString *n = VMMixNormalizeCategory(cat);
-            NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
-            VMMixRemember(n, VMMixCachedMode(), VMMixCachedPolicy(), o);
-            if (vm_orig_privSetOptions) return vm_orig_privSetOptions(self, _cmd, o, n, error);
-        }
+        NSString *n = VMMixNormalizeCategory(cat);
+        NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
+        VMMixRemember(n, VMMixCachedMode(), VMMixCachedPolicy(), o);
+        if (vm_orig_privSetOptions) return vm_orig_privSetOptions(self, _cmd, o, n, error);
     }
     return vm_orig_privSetOptions ? vm_orig_privSetOptions(self, _cmd, options, cat, error) : NO;
 }
@@ -1319,13 +1316,10 @@ static BOOL vm_mix_privSetOptions(id self, SEL _cmd, NSUInteger options,
 static BOOL vm_mix_privSetCat(id self, SEL _cmd, NSString *cat, id modes,
                               NSUInteger policy, NSUInteger options) {
     if (VMMixConfigActive()) {
-        VMMixRemember(cat, VMMixCachedMode(), policy, options);
-        if (VMMixOtherPlaying()) {
-            NSString *n = VMMixNormalizeCategory(cat);
-            NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
-            VMMixRemember(n, VMMixCachedMode(), policy, o);
-            if (vm_orig_privSetCat) return vm_orig_privSetCat(self, _cmd, n, modes, policy, o);
-        }
+        NSString *n = VMMixNormalizeCategory(cat);
+        NSUInteger o = options | AVAudioSessionCategoryOptionMixWithOthers;
+        VMMixRemember(n, VMMixCachedMode(), policy, o);
+        if (vm_orig_privSetCat) return vm_orig_privSetCat(self, _cmd, n, modes, policy, o);
     }
     return vm_orig_privSetCat ? vm_orig_privSetCat(self, _cmd, cat, modes, policy, options) : NO;
 }
@@ -1798,7 +1792,7 @@ static void VMStartEngine(void) {
             if (!skip) wl = VMWhitelistDecide(bid, &wlFile, &wlReason);
             BOOL forcedActive = (forced >= 0.0f && forced <= 1.0f);
 
-            VMLog(@"=== v2.0.2 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f 白名单=%d",
+            VMLog(@"=== v2.0.3 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f 白名单=%d",
                   bid, enabled, skip, isExt, gVMAQDebug, (double)forced, wl);
             if (!skip) {
                 VMLog(@"白名单：%@ | %@", wlFile ?: @"(未初始化)", wlReason);
