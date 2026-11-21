@@ -2,7 +2,10 @@
 # ============================================================================
 # VolumeManager rootless 发布构建（v1.2.5 起）
 #
-#   用法: build-rootless.sh [full|patch|all]   （默认 all）
+#   用法: build-rootless.sh [full|patch|dylib|all]   （默认 all）
+#   dylib（2.1.0 起）：纯注入母本容器——无 SpringBoard 组件/无面板/无闸门
+#   （-DVMDYLIB=1：内嵌音量弹窗 + Documents 自包含配置），deb 仅作下载容器，
+#   提取 dylib → TrollFools/JailFools 注入目标 App，全程不依赖 Sileo。
 #
 #   产出: release/com.local.volmanaudioqueue[_full]_<版本>_iphoneos-arm64.deb
 #
@@ -22,14 +25,19 @@ export PATH="$THEOS/bin:$PATH"
 REPO=/mnt/d/WorkBudy/iOS-Tweaks/VolumeManager
 OUT=/mnt/d/WorkBudy/iOS-Tweaks/release
 # 原版组件来源：最新稳定全量包（含净化模块执行位修复与已净化面板），按优先级回退
-COMPONENT_SRC=""
-for cand in "$OUT/com.local.volmanaudioqueue.full_1.2.1_iphoneos-arm64.deb" \
-            "$OUT/com.local.volmanaudioqueue.full_1.2.0_iphoneos-arm64.deb" ; do
-  [ -f "$cand" ] && { COMPONENT_SRC="$cand"; break; }
-done
 VARIANT="${1:-all}"
 
-[ -n "$COMPONENT_SRC" ] || { echo "!! 找不到任何组件来源（full_1.2.1 / full_1.2.0 均不存在）"; exit 1; }
+# 原版组件来源（SBHUD 等 SpringBoard 侧闭源组件；dylib 容器形态不需要）：
+COMPONENT_SRC=""
+if [ "$VARIANT" != "dylib" ]; then
+  for cand in "$OUT/com.local.volmanaudioqueue.full_1.2.1_iphoneos-arm64.deb" \
+              "$OUT/com.local.volmanaudioqueue.full_1.2.0_iphoneos-arm64.deb" ; do
+    [ -f "$cand" ] && { COMPONENT_SRC="$cand"; break; }
+  done
+fi
+
+[ -n "$COMPONENT_SRC" ] || [ "$VARIANT" = "dylib" ] || \
+  { echo "!! 找不到任何组件来源（full_1.2.1 / full_1.2.0 均不存在）"; exit 1; }
 
 build_one() {
   local kind="$1"
@@ -40,7 +48,13 @@ build_one() {
   cp "$REPO/packaging/Makefile.$kind"        "$DST/Makefile"
   cp "$REPO/packaging/control.$kind"         "$DST/control"
   cp "$REPO/src/VolManAudioQueue/Tweak.xm"   "$DST/"
-  cp "$REPO/src/VolManAudioQueue/VolManAudioQueue.plist" "$DST/"
+  # dylib 容器的过滤器 = 永不匹配的惰性 plist（tweak.mk 强制要求 plist 存在；
+  # Bundles 指向不存在的 bundle id → 永不注入 = 误装也完全惰性）。
+  if [ "$kind" = "dylib" ]; then
+    cp "$REPO/packaging/VolManAudioQueue.noop.plist" "$DST/VolManAudioQueue.plist"
+  else
+    cp "$REPO/src/VolManAudioQueue/VolManAudioQueue.plist" "$DST/"
+  fi
   cp "$REPO/packaging/DEBIAN/postinst.$kind" "$DST/layout/DEBIAN/postinst"
   cp "$REPO/packaging/DEBIAN/postrm.$kind"   "$DST/layout/DEBIAN/postrm"
   chmod +x "$DST/layout/DEBIAN/postinst" "$DST/layout/DEBIAN/postrm"
@@ -49,9 +63,16 @@ build_one() {
   find "$DST" -type f -exec sed -i 's/\r$//' {} \; 2>/dev/null || true
   chmod 644 "$DST/Tweak.xm" "$DST/Makefile" "$DST/control" "$DST/VolManAudioQueue.plist" 2>/dev/null || true
 
-  # 原版组件
-  rm -rf "$DST/orig" && mkdir -p "$DST/orig"
-  dpkg-deb -x "$COMPONENT_SRC" "$DST/orig"
+  # dylib 变体：打包期改写引擎 banner（源文件不动）——实机验收=容器日志头可区分 dylib 形态
+  if [ "$kind" = "dylib" ]; then
+    sed -i -E 's/=== v[0-9][0-9.]* 注入/=== v2.1.4-dylib 注入/' "$DST/Tweak.xm"
+  fi
+
+  # 原版组件（dylib 容器不需要）
+  if [ "$kind" != "dylib" ]; then
+    rm -rf "$DST/orig" && mkdir -p "$DST/orig"
+    dpkg-deb -x "$COMPONENT_SRC" "$DST/orig"
+  fi
   local DL="$DST/layout/Library/MobileSubstrate/DynamicLibraries"
   if [ "$kind" = "full" ]; then
     cp -a "$DST/orig/var/jb/Library/." "$DST/layout/Library/"
@@ -67,6 +88,11 @@ build_one() {
     rm -f  "$DST/layout/Library/PreferenceLoader/Preferences/VolumeManagerPrefs.plist"
     rm -f  "$DL/VolumeManager.dylib" "$DL/VolumeManager.plist" \
            "$DL/VolManPrefsClean.dylib" "$DL/VolManPrefsClean.plist"
+  elif [ "$kind" = "dylib" ]; then
+    # dylib（2.1.0）：纯注入母本容器——layout 只含 tweak.mk 产物
+    #（DL 引擎 dylib + 惰性 noop 过滤器），无 SBHUD/HUDPatch/面板/任何配置。
+    # 用法=从 deb 提取 dylib 注入 App；误装也完全惰性（noop 过滤器永不匹配）。
+    :
   else
     cp -a "$DST/orig/var/jb/Library/MobileSubstrate/DynamicLibraries/VolManPrefsClean.dylib" \
           "$DST/orig/var/jb/Library/MobileSubstrate/DynamicLibraries/VolManPrefsClean.plist" "$DL/"
@@ -76,7 +102,7 @@ build_one() {
   fi
 
   # HUD 透明补丁模块（v2.0 步骤②；CI FAT 产物，人工下载放 hudpatch-prebuilt）
-  # 缺席不阻塞构建：full 包照常出，透明补丁功能不进包（docs/05 §四.2）。
+  # 缺席不阻塞构建：full 照常出，透明补丁功能不进包（docs/05 §四.2）。
   if [ "$kind" = "full" ]; then
     HUDPRE="$REPO/tools/hudpatch-prebuilt"
     if [ -f "$HUDPRE/VolManHUDPatch.dylib" ] && [ -f "$HUDPRE/VolManHUDPatch.plist" ]; then
@@ -88,8 +114,10 @@ build_one() {
     else
       echo "提示 — hudpatch-prebuilt 缺 VolManHUDPatch（跳过；HUD 透明补丁不进包）"
     fi
+  fi
 
-    # 自写设置面板（v2.0 步骤③；CI FAT 产物 bundle + 打包期生成 entry）
+  # 自写设置面板（v2.0 步骤③；仅 full——lite 无开关/白名单 UI，不进包）
+  if [ "$kind" = "full" ]; then
     PANELPRE="$REPO/tools/panel-prebuilt"
     if [ -f "$PANELPRE/VolManPrefsPanel.bundle/VolManPrefsPanel" ]; then
       PANEL_DST="$DST/layout/Library/PreferenceBundles/VolManPrefsPanel.bundle"
@@ -181,7 +209,8 @@ EOF
 case "$VARIANT" in
   full)  build_one full ;;
   patch) build_one patch ;;
+  dylib) build_one dylib ;;
   all)   build_one full; build_one patch ;;
-  *) echo "用法: $0 [full|patch|all]"; exit 1 ;;
+  *) echo "用法: $0 [full|patch|dylib|all]"; exit 1 ;;
 esac
 echo "全部完成 → $OUT"

@@ -106,6 +106,9 @@
 #import <Foundation/Foundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <AVFoundation/AVFoundation.h>
+#if VMDYLIB
+#import <UIKit/UIKit.h>   // dylib 形态：内嵌音量弹窗（临时卡片，无常驻悬浮物）
+#endif
 #import <objc/runtime.h>
 #import <substrate.h>
 #import <dispatch/dispatch.h>
@@ -164,6 +167,17 @@ static NSArray<NSString *> *VMDirs(void) {
 // 配置路径候选（按优先级）
 static NSArray<NSString *> *VMConfigCandidates(void) {
     NSMutableArray *a = [NSMutableArray array];
+#if VMDYLIB
+    // dylib 形态：本 App 容器 Documents 最优先（自包含配置，沙盒内读写都通——
+    // 顺带解锁 B站/红果类 jbroot 不可达 App 的音量调节）。文件不存在时回退
+    // 原顺序：老用户的 jbroot 既有配置继续生效，直到首次用弹窗调整才切自包含。
+    @try {
+        NSString *home = NSHomeDirectory();
+        if (home.length) {
+            [a addObject:[home stringByAppendingPathComponent:@"Documents/volumeInfo.plist"]];
+        }
+    } @catch (NSException *e) { }
+#endif
     for (NSString *d in VMDirs()) {
         [a addObject:[d stringByAppendingPathComponent:@"volumeInfo.plist"]];
     }
@@ -205,6 +219,7 @@ static volatile int64_t gRCCalls  = 0;      // 渲染回调被调用总次数（
 static volatile int64_t gRCScaled = 0;      // 其中真正执行了缩放的次数（系数 <1.0 且格式可用）
 static volatile int   gInstalled  = 0;      // 挂钩是否已安装
 static volatile int   gHookLogCap = 0;      // 非实时路径日志配额
+static volatile int   gWrapProbe = 0;       // dylib 形态：包装路径二分探针（v2.1.2）
 static volatile int   gReapply    = 0;      // 正在回写音量 → 挂钩直接放行（防自噬）
 static volatile int   gFallbackDirty = 0;   // 备用层曾写入过「基准×系数」，需要回退
 
@@ -1414,6 +1429,15 @@ static void VMMixInstallHooks(void) {
     AURenderCallbackStruct orig;
     memcpy(&orig, inData, sizeof(orig));
 
+    // v2.1.2 崩溃二分探针：红果/汽水在「已安装挂钩+会话激活」时闪退且无包装
+    // 日志——此行先于 VMObtainCtx/VMQueryASBD 打印，用于区分「崩在包装准备
+    // 内部」还是「根本没走到包装」（AVPlayer 等备用层路径）。
+    if (gWrapProbe < 20) {
+        gWrapProbe++;
+        VMLog(@"拦截 SetRenderCallback unit=%p scope=%u elem=%u proc=%p",
+              inUnit, (unsigned)inScope, (unsigned)inElement, orig.inputProc);
+    }
+
     // 我们自己装的回调：直接放过，避免重复包装
     if (orig.inputProc == VMRenderCB) {
         return %orig(inUnit, inID, inScope, inElement, inData, inDataSize);
@@ -1666,7 +1690,11 @@ static void VMRefresh(NSString *reason) {
         }
 
         NSString *bid = VMCurrentBundleId();
+#if VMDYLIB
+        BOOL enabled  = YES;      // dylib 形态：无总开关语义
+#else
         BOOL enabled  = VMPrefsEnabled();
+#endif
 
         // 配置路径失效（例如被删掉/换位置）→ 重新探测
         NSDictionary *root = nil;
@@ -1765,6 +1793,206 @@ static void VMStartEngine(void) {
           (unsigned long)VMNotifyNames().count);
 }
 
+#if VMDYLIB
+// ===========================================================================
+// dylib 形态：内嵌音量弹窗（替代 SpringBoard HUD 的调音量入口）
+//   · 唤出 = 摇一摇（sendEvent 层收 motion 事件，零手势冲突——抖音其他插件
+//     占双指长按、AppLock+ 占双指双击；全屏视频下随时可用，无常驻悬浮物）
+//   · 弹窗 = 临时卡片（App 名 + 滑杆 + 百分比 + 完成），点卡片外关闭，
+//     关闭后零残留视图，不干扰应用视窗
+//   · 写入 = 本 App 容器 Documents/volumeInfo.plist（自包含配置，沙盒内读写）
+//   · 生效 = 写完即刷新；解析路径不是刚写的那份时清空 gCfgPath 强制重探
+//     （Documents 在 dylib 形态最优先，弹窗首写后配置即切换到自包含）
+// ===========================================================================
+static int gVMDylibWindowUp = 0;   // 弹窗是否在屏（防重复唤出）
+
+// 自包含写入：把本 App 的系数写进 Documents/volumeInfo.plist（保留其他条目）
+static void VMDylibWriteOwnVolume(float f) {
+    @try {
+        NSString *home = NSHomeDirectory();
+        if (!home.length) { VMLog(@"弹窗写入失败：无沙盒路径"); return; }
+        NSString *docs = [home stringByAppendingPathComponent:@"Documents/volumeInfo.plist"];
+        NSMutableDictionary *root = [[NSMutableDictionary dictionaryWithContentsOfFile:docs] mutableCopy];
+        if (!root) root = [NSMutableDictionary dictionary];
+        NSString *bid = VMCurrentBundleId() ?: @"unknown";
+        NSMutableDictionary *entry = [[root objectForKey:bid] mutableCopy];
+        if (!entry) entry = [NSMutableDictionary dictionary];
+        entry[@"volume"] = @(f);
+        if (!entry[@"appName"]) {
+            NSString *name = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"]
+                             ?: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"];
+            if (name.length) entry[@"appName"] = name;
+        }
+        root[bid] = entry;
+        if (![root writeToFile:docs atomically:YES]) {
+            VMLog(@"弹窗写入失败：%@", docs);
+            return;
+        }
+        VMLog(@"弹窗写入：volume=%.4f → %@", (double)f, docs);
+        // 当前解析路径不是刚写的那份 → 清空强制重探（dylib 形态 Documents 最优先）
+        if (![gCfgPath isEqualToString:docs]) {
+            gCfgPath = nil; gCfgDir = nil;
+        }
+        VMRefresh(@"弹窗写入");
+    } @catch (NSException *e) {
+        VMLog(@"弹窗写入异常: %@", e);
+    }
+}
+
+@interface VMDylibPopupController : NSObject <UIGestureRecognizerDelegate>
+@property (strong, nonatomic) UIWindow *window;
+@property (strong, nonatomic) UILabel  *pctLabel;
+@property (strong, nonatomic) UISlider *slider;
++ (void)present;
+- (void)vmSliderChanged:(UISlider *)s;
+- (void)vmClose;
+@end
+
+static VMDylibPopupController *gVMDylibPopup = nil;   // strong，弹窗存活期持有
+
+@implementation VMDylibPopupController
+
++ (void)present {
+    @try {
+        if (gVMDylibWindowUp) return;
+        UIWindowScene *scene = nil;
+        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+            if (![s isKindOfClass:[UIWindowScene class]]) continue;
+            UIWindowScene *ws = (UIWindowScene *)s;
+            if (ws.activationState == UISceneActivationStateForegroundActive) { scene = ws; break; }
+            if (!scene) scene = ws;
+        }
+        CGRect screen = [UIScreen mainScreen].bounds;
+        VMDylibPopupController *pc = [VMDylibPopupController new];
+        UIWindow *win = scene ? [[UIWindow alloc] initWithWindowScene:scene]
+                              : [[UIWindow alloc] initWithFrame:screen];
+        if (!win) { VMLog(@"弹窗唤出失败：无法创建 UIWindow"); return; }
+        win.frame = screen;
+        win.windowLevel = UIWindowLevelAlert + 100.0;
+        win.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.22];   // 点空白处关闭的遮罩层
+        win.hidden = NO;   // 只显示不抢 key（不干扰应用键盘/第一响应者）
+
+        UIView *card = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 280, 168)];
+        card.center = CGPointMake(CGRectGetMidX(screen), CGRectGetMidY(screen));
+        card.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin
+                              | UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
+        card.backgroundColor = [UIColor colorWithWhite:0.10 alpha:0.94];
+        card.layer.cornerRadius = 16.0;
+        card.layer.masksToBounds = YES;
+        [win addSubview:card];
+
+        NSString *appName = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"]
+                         ?: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"]
+                         ?: (VMCurrentBundleId() ?: @"当前应用");
+        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 16, 248, 22)];
+        title.text = [NSString stringWithFormat:@"音量 · %@", appName];
+        title.textColor = [UIColor whiteColor];
+        title.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+        title.textAlignment = NSTextAlignmentCenter;
+        [card addSubview:title];
+
+        UILabel *pct = [[UILabel alloc] initWithFrame:CGRectMake(16, 42, 248, 34)];
+        pct.font = [UIFont monospacedDigitSystemFontOfSize:30 weight:UIFontWeightMedium];
+        pct.textColor = [UIColor whiteColor];
+        pct.textAlignment = NSTextAlignmentCenter;
+        [card addSubview:pct];
+
+        UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(24, 84, 232, 34)];
+        sl.minimumValue = 0.0;
+        sl.maximumValue = 1.0;
+        sl.value = (gVolume >= 0.0f && gVolume <= 1.0f) ? gVolume : 1.0f;
+        [sl addTarget:pc action:@selector(vmSliderChanged:) forControlEvents:UIControlEventValueChanged];
+        [sl addTarget:pc action:@selector(vmSliderReleased:)
+                 forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
+        [card addSubview:sl];
+
+        UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
+        done.frame = CGRectMake(16, 126, 248, 32);
+        [done setTitle:@"完成" forState:UIControlStateNormal];
+        [done setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.75] forState:UIControlStateNormal];
+        done.titleLabel.font = [UIFont systemFontOfSize:15];
+        [done addTarget:pc action:@selector(vmClose) forControlEvents:UIControlEventTouchUpInside];
+        [card addSubview:done];
+
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:pc
+                                                                              action:@selector(vmClose)];
+        tap.delegate = pc;
+        [win addGestureRecognizer:tap];
+
+        pc.window = win;
+        pc.slider = sl;
+        pc.pctLabel = pct;
+        pct.text = [NSString stringWithFormat:@"%.0f%%", (double)(sl.value * 100.0)];
+        gVMDylibWindowUp = 1;
+        gVMDylibPopup = pc;
+        VMLog(@"弹窗唤出：当前系数 %.4f（摇一摇触发）", (double)gVolume);
+    } @catch (NSException *e) {
+        VMLog(@"弹窗唤出异常: %@", e);
+        gVMDylibWindowUp = 0;
+    }
+}
+
+// 只有点到卡片外的遮罩区（touch.view 就是 window 本身）才关闭
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr shouldReceiveTouch:(UITouch *)touch {
+    return touch.view == self.window;
+}
+
+- (void)vmSliderChanged:(UISlider *)s {
+    // v2.1.4（用户拍板）：拖动=纯预览，零写入零刷新——只记录松手那一刻的
+    // 最终音量。拖动期间对播放器/配置的全部干扰归零。
+    self.pctLabel.text = [NSString stringWithFormat:@"%.0f%%", (double)(s.value * 100.0)];
+}
+
+- (void)vmSliderReleased:(UISlider *)s {
+    // 松手=唯一写入点：写终值 → 刷新生效 → 0.4s 后自动收弹窗。
+    // 抖音实测：弹窗常驻期间视频暂停、弹窗关掉自动恢复（其播放页对 alert 级
+    // 悬浮窗口的自保逻辑，直播页无此行为）——松手即收场，把暂停窗口压到最短。
+    float f = s.value;
+    if (gQueue) {
+        dispatch_async(gQueue, ^{ VMDylibWriteOwnVolume(f); });
+    } else {
+        VMDylibWriteOwnVolume(f);
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self vmClose];
+    });
+}
+
+- (void)vmClose {
+    @try {
+        self.window.hidden = YES;
+        self.window = nil;
+        gVMDylibWindowUp = 0;
+        gVMDylibPopup = nil;
+        VMLog(@"弹窗关闭");
+    } @catch (NSException *e) { }
+}
+
+@end
+
+%group VMDylibUI
+
+%hook UIApplication
+- (void)sendEvent:(UIEvent *)event {
+    %orig;
+    @try {
+        if (gVMDylibWindowUp) return;   // 弹窗在屏时不重复唤出
+        // 摇一摇唤出（v2.1.1）：与抖音其他插件的双指长按、AppLock+ 的双指双击
+        // 零冲突；sendEvent 层直接收 motion 事件，应用第一响应者吞掉也收得到。
+        if (event.type != UIEventTypeMotion) return;
+        if (event.subtype != UIEventSubtypeMotionShake) return;
+        if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [VMDylibPopupController present];
+        });
+    } @catch (NSException *e) { }
+}
+%end
+
+%end   // %group VMDylibUI
+#endif   // VMDYLIB
+
 // ===========================================================================
 // 入口
 // ===========================================================================
@@ -1772,7 +2000,11 @@ static void VMStartEngine(void) {
     @autoreleasepool {
         @try {
             NSString *bid  = VMCurrentBundleId();
+#if VMDYLIB
+            BOOL enabled   = YES;      // dylib 形态：无总开关语义（残留 prefs 不再生效）
+#else
             BOOL enabled   = VMPrefsEnabled();
+#endif
             BOOL isSB      = [bid isEqualToString:@"com.apple.springboard"];
             // v1.3.0：Widget/Today 等扩展进程（PluginKitPlugin 容器）不可能出声，
             // 挂钩 + 0.5s 轮询 + 探针日志对它们纯属浪费 —— 与 SpringBoard 同级跳过。
@@ -1789,7 +2021,12 @@ static void VMStartEngine(void) {
             VMWhitelistVerdict wl = VMWhitelistLegacy;
             NSString *wlFile = nil;
             NSString *wlReason = @"";
+#if VMDYLIB
+            // dylib 形态：无白名单语义（设备上残留的名单文件一律忽略）
+            wlReason = @"dylib 形态（无白名单）";
+#else
             if (!skip) wl = VMWhitelistDecide(bid, &wlFile, &wlReason);
+#endif
             BOOL forcedActive = (forced >= 0.0f && forced <= 1.0f);
 
             VMLog(@"=== v2.0.4 注入 | bundle=%@ 总开关=%d 跳过=%d 扩展=%d 调试=%d 调试旁路=%.3f 白名单=%d",
@@ -1852,9 +2089,16 @@ static void VMStartEngine(void) {
             } else if (wl == VMWhitelistOut) {
                 gVolume = 1.0f;
                 reason = [NSString stringWithFormat:@"白名单不通过：%@", wlReason];
+#if VMDYLIB
+            } else if (!cfgPath) {
+                gVolume = 1.0f;
+                install = YES;
+                reason = @"dylib 形态：配置缺失（系数 1.0，弹窗创建配置后自动接管）";
+#else
             } else if (!cfgPath) {
                 gVolume = 1.0f;
                 reason = @"配置缺失（所有候选路径都读不到）";
+#endif
             } else {
                 gVolume = cfgFactor;
                 install = YES;
@@ -1862,6 +2106,26 @@ static void VMStartEngine(void) {
                        ? [NSString stringWithFormat:@"配置匹配(%@)=%.4f", cfgKey ?: @"?", (double)cfgFactor]
                        : @"配置存在但本 App 未匹配（系数 1.0，挂钩仍安装以便后续变化）";
             }
+
+#if VMDYLIB
+            // per-App 音量挂钩开关（v2.1.2）：App 自己容器 Documents/vmaq-novolume
+            // （沙盒内可用 Filza 放空文件）。红果/汽水这类「装上音量挂钩就在会话
+            // 激活时闪退」的 App 用它止血——只关音量挂钩，混音照常；同时也是
+            // 崩溃归因的二分开关（关掉后不崩=崩在音量挂钩路径）。
+            BOOL vmNovolume = NO;
+            @try {
+                NSString *home = NSHomeDirectory();
+                if (home.length) {
+                    vmNovolume = [[NSFileManager defaultManager] fileExistsAtPath:
+                                 [home stringByAppendingPathComponent:@"Documents/vmaq-novolume"]];
+                }
+            } @catch (NSException *e) { }
+            if (vmNovolume) {
+                install = NO;
+                gVolume = 1.0f;
+                reason = @"dylib 形态：Documents/vmaq-novolume 存在（本 App 关音量挂钩，混音照常）";
+            }
+#endif
 
             if (install) {
                 %init(VMHooks);
@@ -1872,6 +2136,12 @@ static void VMStartEngine(void) {
                 gInstalled = 0;
                 VMLog(@"不安装音量挂钩（原因：%@），混音层=%d", reason, gMixHooked);
             }
+#if VMDYLIB
+            if (!skip && !vmNovolume) {
+                %init(VMDylibUI);
+                VMLog(@"dylib 形态：内嵌音量弹窗就绪（摇一摇唤出，点卡片外关闭）");
+            }
+#endif
         } @catch (NSException *e) {
             gVolume = 1.0f;
             gInstalled = 0;
