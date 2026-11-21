@@ -1,0 +1,15 @@
+Package: com.local.volmanaudioqueue.dylib
+Name: 音量管理器 Dylib（注入母本容器）
+Version: 2.1.4
+Architecture: iphoneos-arm64
+Section: Tweaks
+Priority: optional
+Maintainer: Chenlin8023
+Author: Chenlin8023
+Description: 音量管理器 dylib 注入版——本包只是 dylib 的下载容器，勿依赖安装生效。
+ 用法：提取 dylib（Filza 解压本 deb，或 GitHub Release 直下）→ TrollFools/JailFools
+ 导入并注入到目标 App → 杀 App 重开。调音量=App 内摇一摇唤出弹窗（与其他插件
+ 手势零冲突）；混音无条件生效（参与同播的 App 都注入即可）。无白名单/总开关/
+ Sileo 依赖；个别 App 若音量挂钩引发闪退，在其容器 Documents 放空文件
+ vmaq-novolume 即只关该 App 的音量挂钩（混音照常）。安装本包不会有任何
+ 系统级效果（dylib 带惰性过滤器，不会被加载）。

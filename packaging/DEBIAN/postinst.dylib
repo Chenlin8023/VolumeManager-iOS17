@@ -1,0 +1,13 @@
+#!/bin/sh
+# ============================================================================
+# VolManAudioQueue Dylib 2.1.0 安装后脚本（下载容器形态）
+#
+# 本包只是 dylib 的「下载容器」：正确用法 = 提取 dylib → TrollFools/JailFools
+# 注入目标 App。安装本包不会有任何系统级效果（dylib 带惰性过滤器，不会被
+# 加载）。此脚本唯一职责是提醒这一点，防止误装后误以为插件坏了。
+# ============================================================================
+echo "VolManAudioQueue Dylib: 本包是注入母本容器，安装不会产生任何效果。"
+echo "  提取 dylib：Filza 解压本 deb → var/jb/Library/MobileSubstrate/DynamicLibraries/VolManAudioQueue.dylib"
+echo "  然后用 TrollFools/JailFools 导入该 dylib 注入目标 App，杀 App 重开即可。"
+echo "  调音量 = App 内双指长按 0.8s 唤出弹窗；混音无条件生效。"
+exit 0

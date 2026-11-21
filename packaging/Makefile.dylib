@@ -1,0 +1,20 @@
+ARCHS = arm64
+TARGET = iphone:clang:16.5:15.0
+THEOS_PACKAGE_SCHEME = rootless
+
+include $(THEOS)/makefiles/common.mk
+
+TWEAK_NAME = VolManAudioQueue
+
+VolManAudioQueue_FILES = Tweak.xm
+VolManAudioQueue_FRAMEWORKS = Foundation AVFoundation AudioToolbox UIKit
+VolManAudioQueue_CFLAGS = -DVMDYLIB=1 -fobjc-arc -Wall -Wno-unused-function
+
+# dylib 形态（2.1.0）：纯注入母本容器
+#   · -DVMDYLIB=1 → 引擎无闸门（忽略白名单/总开关，配置缺失也装挂钩）+
+#     Documents 自包含配置最优先 + 内嵌音量弹窗（双指长按唤出）
+#   · tweak.mk 会把 dylib 落位到 DynamicLibraries 并带上惰性过滤器
+#     （lite-noop：Bundles 指向不存在的 bundle id，永不匹配 → 误装也完全惰性）
+#   · 正确用法 = 从 deb 提取 dylib（或源站直下）→ TrollFools/JailFools 注入目标 App
+
+include $(THEOS_MAKE_PATH)/tweak.mk

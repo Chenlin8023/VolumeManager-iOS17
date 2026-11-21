@@ -9,6 +9,11 @@ build/
 *.dylib
 *.o
 *.a
+# 例外：dylib 变体的文本打包模板（Makefile/control/DEBIAN 脚本，v2.1.4 起误伤修复）
+!packaging/Makefile.dylib
+!packaging/control.dylib
+!packaging/DEBIAN/postinst.dylib
+!packaging/DEBIAN/postrm.dylib
 
 # 逆向分析中间产物
 *.dump
